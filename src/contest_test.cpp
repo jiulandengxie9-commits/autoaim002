@@ -1,0 +1,621 @@
+// 校内赛自瞄测试工具
+//
+// 按《RoboMaster 机甲大师校内赛规则手册》装甲板自瞄任务（60 分）的 6 个工况
+// 驱动比赛模拟器自动跑测试：
+//   1. 原地旋转 低速档 (|ω|=3~5 rad/s)   满分 6
+//   2. 原地旋转 高速档 (|ω|=8~10 rad/s)  满分 8
+//   3. 横向平移 低速档 (v=0.4~0.8 m/s)   满分 8
+//   4. 横向平移 高速档 (v=1.2~1.8 m/s)   满分 10
+//   5. 组合运动 低速档                   满分 12
+//   6. 组合运动 高速档                   满分 16
+//
+// 每个工况：设置靶车运动 → 稳定 3 s → 进入计分窗口（最多 30 s）自动读帧、
+// 检测装甲板、PnP 解算、云台瞄准并开火，最多发射 50 发。命中数用 SDK
+// getLatestArmorHit() 读取（权威物理判定，按 event_id 去重），得分按规则公式
+// 满分 × hits/50 计算。
+//
+// 用法：
+//   ./build/autoaim002_test [--ipc-dir DIR] [--calibration PATH] [--rounds 50]
+//                           [--only N] [--no-fire]
+// 需先启动模拟器：
+//   /home/xqy/autoaim/linux-x86_64/daedalus-contest.sh start --scene shooting-range
+
+#include <daedalus_sim_sdk/contest_client.hpp>
+#include <daedalus_sim_sdk/scene_control_client.hpp>
+
+#include "detector.hpp"
+#include "planning.hpp"
+#include "vision_processing.hpp"
+
+#include <opencv2/calib3d.hpp>
+#include <opencv2/core.hpp>
+#include <opencv2/highgui.hpp>
+#include <opencv2/imgproc.hpp>
+
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <iterator>
+#include <optional>
+#include <string>
+#include <thread>
+#include <unistd.h>
+#include <vector>
+
+using namespace daedalus::sim::sdk::v1;
+
+namespace {
+
+struct Options {
+  std::string ipc_directory;
+  std::string calibration_path =
+      "/home/xqy/autoaim/linux-x86_64/camera-calibration.json";
+  std::uint32_t rounds = 50;
+  int only = -1;      // 只跑某个工况（0..5），-1 跑全部
+  bool fire = true;
+  bool show_window = true;
+  bool set_motion = true;  // 跳过靶车运动设置（用于静止靶车验证）
+  std::string window_title = "AutoAim Test";
+  double bullet_speed = 25.0;  // 比赛版弹丸初速 25 m/s
+  detect::Backend detector_backend = detect::Backend::NeuralNetwork;  // 默认神经网络
+  std::string nn_model_path = "/home/xqy/桌面/tongji/assets/yolo11.xml";
+  vision::LightColor color = vision::LightColor::Red;  // 模拟器敌方装甲板为红色灯条
+  double armor_width = 0.135;
+  double armor_height = 0.056;
+  vision::DetectionParams det;
+};
+
+struct Condition {
+  const char* name;
+  RangeMotionMode mode;
+  double speed;      // m/s 或 rad/s，视模式
+  double span;       // m，平移峰峰行程
+  double spin_rps;   // rad/s（旋转）
+  double full_marks; // 该工况满分
+};
+
+// 6 个工况（速度取档位中值；行程取 1.5~2.0 m 中值 1.75）。
+const std::vector<Condition> kConditions = {
+    {"spin-low  原地旋转 低速", RangeMotionMode::Spin, 0.0, 0.0, 4.0, 6.0},
+    {"spin-high 原地旋转 高速", RangeMotionMode::Spin, 0.0, 0.0, 9.0, 8.0},
+    {"linear-low 横向平移 低速", RangeMotionMode::Linear, 0.6, 1.75, 0.0, 8.0},
+    {"linear-high 横向平移 高速", RangeMotionMode::Linear, 1.5, 1.75, 0.0, 10.0},
+    {"combo-low 组合 低速", RangeMotionMode::LinearAndSpin, 0.6, 1.75, 4.0, 12.0},
+    {"combo-high 组合 高速", RangeMotionMode::LinearAndSpin, 1.5, 1.75, 9.0, 16.0},
+};
+
+const char* motionName(RangeMotionMode m) {
+  switch (m) {
+    case RangeMotionMode::Stationary: return "Stationary";
+    case RangeMotionMode::Linear: return "Linear";
+    case RangeMotionMode::Spin: return "Spin";
+    case RangeMotionMode::LinearAndSpin: return "LinearAndSpin";
+  }
+  return "?";
+}
+
+const char* statusName(SceneControlStatus s) {
+  switch (s) {
+    case SceneControlStatus::Ok: return "Ok";
+    case SceneControlStatus::InvalidRequest: return "InvalidRequest";
+    case SceneControlStatus::Unsupported: return "Unsupported";
+    case SceneControlStatus::NotReady: return "NotReady";
+    case SceneControlStatus::InternalError: return "InternalError";
+  }
+  return "Unknown";
+}
+
+void printUsage(const char* argv0) {
+  std::cout
+      << "Usage: " << argv0 << " [options]\n"
+      << "Run the 6-condition armor self-aim test on the Daedalus contest\n"
+      << "simulator per the RM school-competition rulebook (60 pts armor task).\n\n"
+      << "Options:\n"
+      << "  --ipc-dir PATH      simulator IPC directory\n"
+      << "                      (default: $XDG_RUNTIME_DIR or /tmp +\n"
+      << "                       /daedalus-contest-<uid>)\n"
+      << "  --calibration PATH  camera-calibration.json path (default: the\n"
+      << "                      release's camera-calibration.json)\n"
+      << "  --rounds N          rounds per condition (default 50)\n"
+      << "  --only N            run only condition N (0..5), default all\n"
+      << "  --no-fire           aim only, do not fire\n"
+      << "  --no-motion         do not set target motion (stationary target)\n"
+      << "  --no-window         disable the OpenCV visualization window\n"
+      << "  --window NAME       visualization window title (default AutoAim Test)\n"
+      << "  --armor-width M     armor width in meters (default 0.135)\n"
+      << "  --armor-height M    armor height in meters (default 0.056)\n"
+      << "  --color NAME        light bar color: red | blue (default red,\n"
+      << "                      the simulator's enemy armor light bars)\n"
+      << "  --bullet-speed M/S  projectile muzzle speed in m/s (default 25.0;\n"
+      << "                      gravity drop is compensated with this)\n"
+      << "  --detector NAME     detector backend: traditional | nn (default nn,\n"
+      << "                      the YOLO neural network via OpenVINO)\n"
+      << "  --nn-model PATH     OpenVINO/ONNX model for --detector nn (default\n"
+      << "                      tongji's yolo11.xml)\n"
+      << "  -h, --help          show this help and exit\n";
+}
+
+double readJsonDouble(const std::string& text, const std::string& key) {
+  const std::string needle = "\"" + key + "\"";
+  std::size_t pos = text.find(needle);
+  if (pos == std::string::npos) return 0.0;
+  pos = text.find(':', pos + needle.size());
+  if (pos == std::string::npos) return 0.0;
+  return std::strtod(text.c_str() + pos + 1, nullptr);
+}
+
+bool readJsonArray(const std::string& text, const std::string& key, double* out,
+                   std::size_t count) {
+  const std::string needle = "\"" + key + "\"";
+  std::size_t pos = text.find(needle);
+  if (pos == std::string::npos) return false;
+  pos = text.find('[', pos + needle.size());
+  if (pos == std::string::npos) return false;
+  ++pos;
+  for (std::size_t i = 0; i < count; ++i) {
+    while (pos < text.size() &&
+           (text[pos] == ' ' || text[pos] == '\t' || text[pos] == '\n' ||
+            text[pos] == ',' || text[pos] == '\r')) {
+      ++pos;
+    }
+    out[i] = std::strtod(text.c_str() + pos, nullptr);
+    while (pos < text.size() && text[pos] != ',' && text[pos] != ']') ++pos;
+    if (pos >= text.size()) return false;
+  }
+  return true;
+}
+
+bool loadCalibration(const std::string& path, vision::CameraIntrinsics& k,
+                     vision::CameraExtrinsics& e) {
+  std::ifstream in(path);
+  if (!in) return false;
+  const std::string text((std::istreambuf_iterator<char>(in)),
+                         std::istreambuf_iterator<char>());
+  k.fx = readJsonDouble(text, "fx");
+  k.fy = readJsonDouble(text, "fy");
+  k.cx = readJsonDouble(text, "cx");
+  k.cy = readJsonDouble(text, "cy");
+  if (k.fx <= 0.0 || k.fy <= 0.0) return false;
+  readJsonArray(text, "distortion", k.distortion, 5);
+  readJsonArray(text, "translation_m", e.translation_m, 3);
+  readJsonArray(text, "quaternion_xyzw", e.quaternion_xyzw, 4);
+  return true;
+}
+
+cv::Mat frameToBgr(const TcpImageFrame& frame) {
+  const tcp_image::FrameHeader& h = frame.header;
+  if (h.format == tcp_image::PixelFormat::Rgba32) {
+    cv::Mat rgba(static_cast<int>(h.height), static_cast<int>(h.width), CV_8UC4,
+                 const_cast<std::uint8_t*>(frame.payload.data()));
+    cv::Mat bgr;
+    cv::cvtColor(rgba, bgr, cv::COLOR_RGBA2BGR);
+    return bgr;
+  }
+  if (h.format == tcp_image::PixelFormat::Rgb24) {
+    cv::Mat rgb(static_cast<int>(h.height), static_cast<int>(h.width), CV_8UC3,
+                const_cast<std::uint8_t*>(frame.payload.data()));
+    cv::Mat bgr;
+    cv::cvtColor(rgb, bgr, cv::COLOR_RGB2BGR);
+    return bgr;
+  }
+  return cv::Mat();
+}
+
+Options parseArgs(int argc, char** argv) {
+  Options o;
+  for (int i = 1; i < argc; ++i) {
+    const std::string arg = argv[i];
+    const auto next = [&](const char* f) -> std::string {
+      if (i + 1 >= argc) {
+        std::cerr << "missing value for " << f << "\n";
+        std::exit(2);
+      }
+      return argv[++i];
+    };
+    if (arg == "--ipc-dir") {
+      o.ipc_directory = next("--ipc-dir");
+    } else if (arg == "--calibration") {
+      o.calibration_path = next("--calibration");
+    } else if (arg == "--rounds") {
+      o.rounds = static_cast<std::uint32_t>(std::strtoul(next("--rounds").c_str(), nullptr, 10));
+      if (o.rounds == 0) {
+        std::cerr << "--rounds must be > 0\n";
+        std::exit(2);
+      }
+    } else if (arg == "--only") {
+      o.only = std::atoi(next("--only").c_str());
+    } else if (arg == "--no-fire") {
+      o.fire = false;
+    } else if (arg == "--no-motion") {
+      o.set_motion = false;
+    } else if (arg == "--no-window") {
+      o.show_window = false;
+    } else if (arg == "--window") {
+      o.window_title = next("--window");
+    } else if (arg == "--armor-width") {
+      o.armor_width = std::strtod(next("--armor-width").c_str(), nullptr);
+    } else if (arg == "--armor-height") {
+      o.armor_height = std::strtod(next("--armor-height").c_str(), nullptr);
+    } else if (arg == "--color") {
+      const std::string name = next("--color");
+      if (name == "red") {
+        o.color = vision::LightColor::Red;
+      } else if (name == "blue") {
+        o.color = vision::LightColor::Blue;
+      } else {
+        std::cerr << "--color must be red or blue\n";
+        std::exit(2);
+      }
+    } else if (arg == "--bullet-speed") {
+      o.bullet_speed = std::strtod(next("--bullet-speed").c_str(), nullptr);
+      if (o.bullet_speed <= 0.0) {
+        std::cerr << "--bullet-speed must be positive\n";
+        std::exit(2);
+      }
+    } else if (arg == "--detector") {
+      const std::string name = next("--detector");
+      if (name == "traditional") {
+        o.detector_backend = detect::Backend::Traditional;
+      } else if (name == "nn") {
+        o.detector_backend = detect::Backend::NeuralNetwork;
+      } else {
+        std::cerr << "--detector must be traditional or nn\n";
+        std::exit(2);
+      }
+    } else if (arg == "--nn-model") {
+      o.nn_model_path = next("--nn-model");
+    } else if (arg == "-h" || arg == "--help") {
+      printUsage(argv[0]);
+      std::exit(0);
+    } else {
+      std::cerr << "unknown option: " << arg << "\n";
+      printUsage(argv[0]);
+      std::exit(2);
+    }
+  }
+  if (o.ipc_directory.empty()) {
+    const char* runtime = std::getenv("XDG_RUNTIME_DIR");
+    std::ostringstream ss;
+    if (runtime != nullptr && *runtime != '\0') {
+      ss << runtime;
+    } else {
+      ss << "/tmp";
+    }
+    ss << "/daedalus-contest-" << ::getuid();
+    o.ipc_directory = ss.str();
+  }
+  return o;
+}
+
+struct ConditionStats {
+  std::uint32_t rounds_fired = 0;
+  std::uint64_t locked_frames = 0;  // 检测到装甲板且发出瞄准命令的帧数
+  std::uint64_t total_frames = 0;
+  std::uint64_t hits = 0;  // 真实命中数（来自 getLatestArmorHit，按 event_id 去重）
+  double elapsed_s = 0.0;
+};
+
+}  // namespace
+
+int main(int argc, char** argv) {
+  const Options o = parseArgs(argc, argv);
+  bool show_window = o.show_window;  // 可在运行时降级为 false
+
+  std::cout << "Daedalus SDK " << kSdkVersion << "  IPC dir: " << o.ipc_directory
+            << "\n";
+
+  // ContestClient: 读帧 + 云台命令（瞄准/开火）。
+  ContestClientOptions copts;
+  copts.ipc_directory = o.ipc_directory;
+  ContestClient sim(copts);
+  if (!sim.connect()) {
+    std::cerr << "could not connect to the simulator in " << o.ipc_directory
+              << ".\nStart it first, e.g.:\n"
+              << "  /home/xqy/autoaim/linux-x86_64/daedalus-contest.sh start\n";
+    return 1;
+  }
+  std::cout << "connected to simulator.\n";
+
+  // SceneControlClient: 设置靶车运动（与 ContestClient 共用场景控制端口 5603）。
+  // 协议要求先以固定 session_id 创建会话，之后 setRangeTargetMotion 才能通过
+  // session 校验。
+  SceneControlOptions sc_opts;
+  sc_opts.session_id = "autoaim002-test";
+  SceneControlClient scene(sc_opts);
+  {
+    auto ses = scene.createSession();
+    if (ses.ok() && ses.value &&
+        ses.value->status == SceneControlStatus::Ok) {
+      std::cout << "scene control session: id=" << ses.value->session_id
+                << " status=" << statusName(ses.value->status) << "\n";
+    } else {
+      std::cerr << "scene control session failed: "
+                << (ses.ok() ? statusName(ses.value->status)
+                             : ses.status.message.c_str())
+                << "\n";
+    }
+  }
+
+  auto scene_res = sim.selectScene(ContestScene::ShootingRange);
+  if (scene_res.ok() && scene_res.value) {
+    std::cout << "scene shooting-range selected: status="
+              << statusName(scene_res.value->status) << "\n";
+  } else {
+    std::cerr << "scene selection failed: " << scene_res.status.message << "\n";
+    return 1;
+  }
+
+  vision::CameraIntrinsics intrinsics;
+  vision::CameraExtrinsics extrinsics;
+  if (!loadCalibration(o.calibration_path, intrinsics, extrinsics)) {
+    std::cerr << "calibration: could not load " << o.calibration_path
+              << "; PnP disabled\n";
+  } else {
+    std::cout << "calibration: fx=" << intrinsics.fx << " fy=" << intrinsics.fy
+              << " cx=" << intrinsics.cx << " cy=" << intrinsics.cy
+              << " (from " << o.calibration_path << ")\n";
+  }
+  const double camera_tilt_deg =
+      2.0 * std::acos(std::clamp(extrinsics.quaternion_xyzw[3], -1.0, 1.0)) *
+      180.0 / CV_PI;
+
+  // 检测器：传统视觉或神经网络（--detector 切换，NN 加载失败自动回退传统）。
+  vision::MorphologyParams det_morph;
+  det_morph.kernel_size = 3;
+  det_morph.rb_threshold = 30;
+  std::unique_ptr<detect::IDetector> detector = detect::makeDetector(
+      o.detector_backend, o.nn_model_path, o.color, det_morph, o.det);
+  std::cout << "detector: " << detector->name() << "\n";
+
+  std::cout << "\nrounds/condition=" << o.rounds
+            << " fire=" << (o.fire ? "on" : "off")
+            << " color=" << (o.color == vision::LightColor::Blue ? "blue" : "red")
+            << " bullet_speed=" << o.bullet_speed << " m/s"
+            << " armor=" << o.armor_width << "x" << o.armor_height << " m"
+            << "\n\n";
+
+  double total_score = 0.0;
+  const auto t_total = std::chrono::steady_clock::now();
+
+  for (int ci = 0; ci < static_cast<int>(kConditions.size()); ++ci) {
+    if (o.only >= 0 && ci != o.only) continue;
+    const Condition& c = kConditions[ci];
+
+    std::cout << "\n========== 工况 " << (ci + 1) << ": " << c.name
+              << "  满分=" << std::fixed << std::setprecision(0) << c.full_marks
+              << " ==========\n";
+
+    // 1) 设置靶车运动。
+    RangeTargetMotion motion;
+    motion.mode = c.mode;
+    motion.linear_speed_mps = static_cast<float>(c.speed);
+    motion.linear_span_m = static_cast<float>(c.span);
+    motion.spin_deg_s = static_cast<float>(c.spin_rps * 180.0 / CV_PI);
+    auto mr = scene.setRangeTargetMotion(motion);
+    std::cout << "  set motion: mode=" << motionName(c.mode)
+              << " v=" << c.speed << " m/s span=" << c.span
+              << " m spin=" << c.spin_rps << " rad/s -> "
+              << (mr.ok() && mr.value ? statusName(mr.value->status)
+                                      : mr.status.message.c_str());
+    if (mr.ok() && mr.value) {
+      std::cout << " applied_seq=" << mr.value->applied_frame_seq;
+    }
+    std::cout << "\n";
+
+    // 2) 稳定 3 s。
+    std::cout << "  stabilizing 3 s...\n";
+    std::this_thread::sleep_for(std::chrono::seconds(3));
+
+    // 3) 计分窗口：最多 30 s，发射最多 rounds 发。
+    ConditionStats st;
+    std::uint64_t last_seq = 0;
+    int lock_streak = 0;               // 连续锁定帧数（开火前需稳定）
+    const int lock_warmup_frames = 8;  // 云台收敛后再开火
+    std::uint32_t hit_count_initial = 0;
+    {
+      auto hit0 = sim.getLatestArmorHit();
+      if (hit0.ok() && hit0.value && hit0.value->has_hit) {
+        hit_count_initial = hit0.value->accurate_count;
+      }
+    }
+    // 目标运动估计（参考 tongji Tracker：用历史位置估计速度/加速度做提前量）。
+    cv::Vec3d track_pos, track_vel(0, 0, 0), track_acc(0, 0, 0);
+    cv::Vec3d prev_pos(0, 0, 0), prev2_pos(0, 0, 0);
+    bool have_prev = false, have_prev2 = false;
+    std::uint64_t prev_ts = 0;
+    const auto t0 = std::chrono::steady_clock::now();
+    double fire_cooldown_s = 0.06;  // ~16 发/s（模拟器射击冷却）
+    auto last_fire = t0;
+    bool window_open = true;
+
+    while (window_open) {
+      auto frame_res = sim.nextFrame(last_seq);
+      if (!frame_res.ok() || !frame_res.value) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        continue;
+      }
+      const ContestFrame& cf = *frame_res.value;
+      last_seq = cf.image.header.source_sequence;
+      ++st.total_frames;
+
+      // 轮询权威命中：getLatestArmorHit.accurate_count 是累计有效命中数，
+      // 每工况命中数 = 工况结束时累计值 - 工况开始时累计值。
+      {
+        auto hit = sim.getLatestArmorHit();
+        if (hit.ok() && hit.value && hit.value->has_hit) {
+          st.hits = hit.value->accurate_count > hit_count_initial
+                        ? hit.value->accurate_count - hit_count_initial
+                        : 0;
+        }
+      }
+
+      const double elapsed = std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - t0).count();
+      if (elapsed > 30.0 || st.rounds_fired >= o.rounds) {
+        window_open = false;
+        st.elapsed_s = elapsed;
+        break;
+      }
+
+      cv::Mat image = frameToBgr(cf.image);
+      if (image.empty()) continue;
+
+      // 用所选检测器识别装甲板（传统视觉或神经网络，--detector 切换）。
+      vision::MorphologyResult morph;  // 空：形态学网格不用于测试工具
+      vision::DetectionResult det = detector->detect(image);
+
+      // 选最近的装甲板并解算位姿。
+      vision::TargetPose best;
+      bool have_best = false;
+      if (!det.armors.empty() && intrinsics.fx > 0.0) {
+        double best_dist = 1e18;
+        for (const auto& armor : det.armors) {
+          vision::TargetPose p =
+              vision::solveArmorPose(armor, intrinsics, extrinsics,
+                                     o.armor_width, o.armor_height);
+          if (!p.valid) continue;
+          if (p.distance_m < best_dist) {
+            best_dist = p.distance_m;
+            best = p;
+            have_best = true;
+          }
+        }
+      }
+
+      // 可视化：无论有无目标都显示检测结果 + HUD + 工况信息。
+      const double yaw = cf.gimbal.yaw_deg;
+      const double pitch = cf.gimbal.pitch_deg;
+      cv::Vec2d aim(0.0, 90.0);
+      double aim_dist = 0.0;
+      if (have_best) {
+        // 更新目标运动估计（有限差分速度/加速度 + 简单低通）。
+        const cv::Vec3d cur = best.t_gimbal;
+        const std::uint64_t ts = cf.image.header.capture_timestamp_ns;
+        const double dt = prev_ts ? (ts - prev_ts) * 1e-9 : 0.0;
+        if (have_prev && dt > 0.0 && dt < 0.5) {
+          const cv::Vec3d inst_vel = (cur - prev_pos) / dt;
+          track_vel = track_vel * 0.7 + inst_vel * 0.3;
+          if (have_prev2 && dt > 0.0) {
+            const cv::Vec3d inst_acc =
+                ((cur - prev_pos) / dt - (prev_pos - prev2_pos) / dt) / dt;
+            track_acc = track_acc * 0.8 + inst_acc * 0.2;
+          }
+          prev2_pos = prev_pos;
+          have_prev2 = true;
+        }
+        track_pos = cur;
+        prev_pos = cur;
+        have_prev = true;
+        prev_ts = ts;
+
+        // 规划器：预测提前量 + 弹道解算（参考 tongji Aimer::aim 的迭代求解）。
+        const planning::AimSolution sol =
+            planning::planAimPoint(track_pos, track_vel, track_acc,
+                                   o.bullet_speed);
+        if (sol.valid) {
+          // 瞄准点在云台系；转相机系后算云台绝对角。
+          const cv::Vec3d aim_cam = vision::gimbalToCamera(sol.aim_point, extrinsics);
+          aim = vision::absoluteAimAngles(aim_cam, yaw, pitch, camera_tilt_deg);
+          aim_dist = sol.distance_m;
+        } else {
+          aim = vision::aimWithGravity(best.t_cam, yaw, pitch, camera_tilt_deg,
+                                       o.bullet_speed);
+          aim_dist = best.distance_m;
+        }
+      }
+      if (show_window) {
+        try {
+          cv::Mat display = vision::drawResult(image, morph, det);
+          if (have_best) {
+            // 在图像上标出目标装甲板中心（相机系坐标直接投影）。
+            const cv::Point2f p = vision::projectPoint(best.t_cam, intrinsics);
+            if (p.x > 0 && p.y > 0) {
+              cv::line(display, cv::Point(int(p.x) - 10, int(p.y)),
+                       cv::Point(int(p.x) + 10, int(p.y)),
+                       cv::Scalar(0, 255, 0), 2);
+              cv::line(display, cv::Point(int(p.x), int(p.y) - 10),
+                       cv::Point(int(p.x), int(p.y) + 10),
+                       cv::Scalar(0, 255, 0), 2);
+            }
+          }
+          vision::drawAimHud(display, yaw, pitch, have_best, aim,
+                             have_best ? aim_dist : 0.0);
+          char info[160];
+          std::snprintf(info, sizeof(info),
+                        "cond %d/6 %s  fired=%u/%u  locked=%llu",
+                        ci + 1, c.name, st.rounds_fired, o.rounds,
+                        (unsigned long long)st.locked_frames);
+          cv::putText(display, info, cv::Point(12, 80),
+                      cv::FONT_HERSHEY_SIMPLEX, 0.55,
+                      cv::Scalar(0, 200, 255), 1, cv::LINE_AA);
+          cv::imshow(o.window_title, display);
+          const int key = cv::waitKey(1);
+          if (key == 'q' || key == 27) {
+            window_open = false;
+            st.elapsed_s = elapsed;
+            break;
+          }
+          if (cv::getWindowProperty(o.window_title, cv::WND_PROP_VISIBLE) < 1) {
+            show_window = false;
+          }
+        } catch (const cv::Exception&) {
+          show_window = false;  // 无图形环境，降级为纯命令行
+        }
+      }
+
+      // 有目标时才瞄准开火。连续锁定 warmup 帧（让云台收敛、目标稳定）后才开火。
+      if (!have_best) {
+        lock_streak = 0;
+        continue;
+      }
+      ++st.locked_frames;
+      ++lock_streak;
+      if (lock_streak < lock_warmup_frames) continue;
+
+      UdpGimbalCommand cmd;
+      cmd.yaw_deg = static_cast<float>(aim[0]);
+      cmd.pitch_deg = static_cast<float>(aim[1]);
+      cmd.distance_m = static_cast<float>(best.distance_m);
+      cmd.fire_advice = o.fire;
+
+      const auto now = std::chrono::steady_clock::now();
+      const double since = std::chrono::duration<double>(now - last_fire).count();
+      if (!o.fire) {
+        (void)sim.sendAim(cmd);
+      } else if (since >= fire_cooldown_s) {
+        (void)sim.sendAim(cmd);
+        last_fire = now;
+        ++st.rounds_fired;
+      }
+    }
+
+    // 4) 统计输出：规则公式 得分 = 满分 × N命中 / 50。
+    const double hit_count = static_cast<double>(st.hits);
+    const double score = c.full_marks * std::min(hit_count, static_cast<double>(o.rounds)) / o.rounds;
+    total_score += score;
+    std::cout << "  [" << c.name << "] frames=" << st.total_frames
+              << " locked=" << st.locked_frames
+              << " rounds_fired=" << st.rounds_fired << "/" << o.rounds
+              << " hits=" << st.hits << " (getLatestArmorHit)"
+              << " window=" << std::fixed << std::setprecision(1)
+              << st.elapsed_s << " s\n"
+              << "  score=" << std::fixed << std::setprecision(2)
+              << score << " / " << c.full_marks
+              << "  (= 满分 × hits/50)\n";
+  }
+
+  const double total_elapsed = std::chrono::duration<double>(
+      std::chrono::steady_clock::now() - t_total).count();
+  std::cout << "\n===== 装甲板自瞄任务汇总 ====="
+            << "  total_score=" << std::fixed << std::setprecision(2)
+            << total_score << " / 60"
+            << "  elapsed=" << std::setprecision(1) << total_elapsed << " s\n";
+
+  sim.close();
+  return 0;
+}

@@ -1,7 +1,8 @@
 # 代码讲解（CODE WALKTHROUGH）
 
 程序由两部分组成：`src/main.cpp`（主程序：SDK 读帧 + 显示/打印 + 调用视觉模块）与
-`src/vision_processing.{hpp,cpp}`（纯视觉处理模块：形态学滤波，不依赖 SDK）。
+`src/vision_processing.{hpp,cpp}`（纯视觉处理模块：形态学滤波、灯条/装甲板识别、
+PnP 位姿估计与卡尔曼滤波，不依赖 SDK）。
 下面按功能拆解它做了什么、为什么这么做。
 
 ## 0. 整体流程
@@ -133,8 +134,9 @@ sim.close();
 `main.cpp` 通过 `#include "vision_processing.hpp"` 调用：
 
 ```cpp
-// 1) R-B 通道差阈值分割红色灯条
-cv::Mat mask = vision::splitRedMask(bgr, rb_threshold);
+// 1) 通道差阈值分割目标色灯条（red: R-B；blue: B-R）
+cv::Mat mask = vision::splitColorMask(bgr, LightColor::Red, rb_threshold);
+// 兼容旧接口：splitRedMask(bgr, thr) == splitColorMask(bgr, Red, thr)
 
 // 2) 形态学滤波（腐蚀/膨胀/开/闭/级联 + 面积滤除）
 vision::MorphologyParams params;
@@ -202,9 +204,138 @@ cv::Mat grid = vision::makeGrid(bgr, m, det, cell_width);
 
 `drawResult` 绘制顺序：轮廓（绿）→ 灯条旋转矩形（黄）→ 装甲板四顶点框（蓝）。
 
+### 大装甲板整体回退（detect_armor_blobs）
+
+模拟器靶场的敌方**大装甲板**在稍远距离/侧视角下，两侧灯条会与装甲板底色连成一个
+连通区域（实测为一个 122×76 px 的矩形，宽长比约 1.6），不满足灯条"竖条、宽/长<0.8"
+约束。`detect()` 在灯条配对之后增加回退路径：
+
+- 对每个轮廓取 `minAreaRect`，归一化使 `w ≤ h`，若 `min_blob_ratio ≤ w/h ≤
+  max_blob_ratio`（默认 0.4~4.0）且面积 ≥ `min_blob_area`，视为单个装甲板。
+- 若该轮廓中心已被灯条配对识别过（距离 < 0.5×高），跳过避免重复。
+- 以矩形左右边缘构造两条合成灯条 + 四顶点 `ArmorDescriptor`，交给后续 PnP 解算。
+
+`DetectionParams` 新增 `detect_armor_blobs / min_blob_area / min_blob_ratio /
+max_blob_ratio` 控制。
+
 `makeGrid(bgr, m, det, cell_width)` 中每个单元格会先统一为 BGR 三通道再放大/缩小到
 指定宽度（默认 480px），文字字号随单元格宽度等比放大，因此用 `--grid-width` 调大后
 调试文字更清晰。
+
+## 10. PnP 三维位姿估计（`solveArmorPose`）
+
+`src/vision_processing.{hpp,cpp}` 新增的纯 OpenCV 世界坐标模块：
+
+- `CameraIntrinsics`：`fx/fy/cx/cy` + 畸变系数（`camera-calibration.json` 内参）。
+- `CameraExtrinsics`：云台→相机光学系的静态外参（平移 + 四元数 xyzw）。
+- `TargetPose`：`valid`、相机系 `t_cam/r_cam`、距离 `distance_m`、云台系
+  `t_gimbal`、装甲板四角点与左右灯条中心的三维坐标。
+
+流程：
+
+1. **标定加载**：`loadCalibration()` 读取发行版 `camera-calibration.json`。
+   `readJsonDouble` / `readJsonArray` 是极简 JSON 提取器（文件结构固定，无需第三方库）。
+2. **solvePnP（IPPE）**：`image_points` 取 `armor.vertex[0..3]`（左上/右上/右下/左下），
+   `object_points` 用真实装甲板尺寸（`--armor-width × --armor-height`，默认
+   0.135 × 0.056 m）构造的局部系平面角点，得到相机系 `rvec/tvec`。
+3. **外参变换**：`cameraToGimbal()` 对 `p_cam` 求 `p_gimbal = Rᵀ·(p_cam − t)`，
+   把装甲板中心与四角点变换到云台（世界）系。
+4. **灯条三维**：左右灯条中心像素与装甲板平面（由 `solvePnP` 的位姿决定）做
+   光线求交，得到其在相机系的三维坐标，再变换到云台系。
+5. **输出**：`main.cpp` 的 `printPoses()` 打印 `pnp armor[i]: distance=… gimbal=(…)`
+   与 `light[j]: gimbal=(…)`；显示/保存结果图时在装甲板旁叠加黄色距离与坐标标注。
+
+坐标系约定：相机光学系为 OpenCV 约定（+Z 前、+X 右、+Y 下）；外参
+`from_frame = gimbal, to_frame = camera_optical`，故云台系（世界系）坐标 =
+`cameraToGimbal(相机系坐标)`。
+
+## 11. 卡尔曼滤波（`KalmanFilter3D`）
+
+`src/vision_processing.{hpp,cpp}` 的 `KalmanFilter3D` 参考 `big_homework.cpp` 的分轴
+卡尔曼（`A` 取位置/速度/加速度，`H = [1 0 0]`）与 `rmcs_auto_aim_v2` 的
+predict/update 流程，合并为单个 9 维线性卡尔曼：
+
+- 状态 `x`：`[x, y, z, vx, vy, vz, ax, ay, az]`。
+- 状态转移 `A`：恒加速度模型，`x += v·dt + a·dt²/2`，`v += a·dt`；`dt` 由帧曝光
+  时间戳差给出。
+- 观测 `H`：只取位置三项；观测值 `z` = `solveArmorPose().t_gimbal`（云台系）。
+- `init(pos, dt)`：用首个观测初始化状态、`Q/R`（由 `process_*_sigma` 与
+  `measurement_sigma` 构造）与初始协方差 `P`。
+- `predict(dt)`：`x_pred = A·x`，`P_pred = A·P·Aᵀ + Q`。
+- `update(z)`：`K = P·Hᵀ·(H·P·Hᵀ+R)⁻¹`，`x += K·(z−H·x)`，`P = (I−K·H)·P`。
+
+`main.cpp` 的 `KalmanTracker` 封装单目标跟踪：
+
+1. 无目标时用 `computePoses()` 的最近装甲板 `init()`。
+2. 每帧 `predict(dt)` 后，在 `poses` 中找离预测位置最近（门限 2 m）的观测
+   `update()`；`lost_frames` 连续 > 60 则清空跟踪。
+3. 打印 `kf: raw=… filtered=… vel=… lost=…`；用 `gimbalToCamera()` + `projectPoint()`
+   把滤波位置投回图像画绿色十字（`KF` 标注）。
+
+`gimbalToCamera` 是 `cameraToGimbal` 的逆（`p_cam = R·p_gimbal + t`）；
+`projectPoint` 用针孔模型（带 plumb-bob 畸变，本发行版畸变全 0）。
+
+## 12. 像素→世界坐标与瞄准角可视化
+
+参考 `big_homework.cpp`（图像角点→PnP→世界系）与 `rmcs_auto_aim_v2` 的
+`reproject_point`/`xyz2ypd`，`vision_processing` 补齐了双向坐标链：
+
+```cpp
+// 像素 (u,v) + 深度 → 相机光学系（带畸变逆变换）
+cv::Vec3d p_cam = vision::pixelToCamera(uv, depth, intrinsics);
+// 相机光学系 → 云台（世界）系
+cv::Vec3d p_world = vision::cameraToGimbal(p_cam, extrinsics);
+// 一步到位：像素 → 世界系
+cv::Vec3d p_world = vision::pixelToWorld(uv, depth, intrinsics, extrinsics);
+// 世界系 → 云台瞄准角（yaw/pitch，度；pitch=90 水平）
+cv::Vec2d aim = vision::worldToAimAngles(p_world);
+```
+
+- `pixelToCamera`：由 `(u-cx)/fx、(v-cy)/fy` 归一化坐标乘深度得到三维点；若畸变
+  非零则做 5 次迭代逆畸变（plumb-bob）。
+- `worldToAimAngles`：`yaw = atan2(x, z)`，`pitch = 90° + atan2(y, √(x²+y²))`，
+  与 SDK `UdpGimbalCommand.pitch_deg`（90=水平）一致。注意这是**云台系相对**角，
+  会随云台转动而变。
+- `absoluteAimAngles(p_cam, gimbal_yaw, gimbal_pitch, camera_tilt)`：**绝对**云台
+  瞄准角 = 当前云台角 + 目标相对相机光轴的偏差（yaw 分量按 `cos(camera_tilt)`
+  缩放、pitch 分量沿倾斜轴直接叠加）。目标在世界中不动时恒定（即使只转云台），
+  这是真正要发给云台的命令角。HUD 的 `target yaw/pitch` 与终端 `kf:` 行的
+  `aim_yaw/aim_pitch` 都输出该绝对角。
+- `gimbalToWorld(p_gimbal, world_pose)`：云台系→绝对世界系（odom）。`world_pose`
+  来自 `readGimbalWorldPose()`（封装 SDK `readExposureStateForFrame()` 返回的
+  `gimbal_position_world` 与 wxyz 四元数），`p_world = R(q_world)·p_gimbal + t_world`。
+  `main.cpp` 的 `printPoses()` 同时打印 `gimbal=` 与 `world=`，便于区分"随云台转的
+  相对坐标"与"绝对世界坐标"。
+
+### 旋转链（相机→云台→世界，参考 `tongji/tasks/auto_aim/solver.cpp`）
+
+`tongji` 的 `Solver::solve()` 不仅变换位置，还把 `solvePnP` 得到的**旋转**沿同一链
+变换并提取欧拉角。本程序在 `vision_processing` 补齐：
+
+```cpp
+// R_armor2gimbal = R_ext^T * R_armor2camera        （相机系旋转向量 → 云台系）
+cv::Vec3d r_gimbal = vision::rotationCameraToGimbal(pose.r_cam, extrinsics);
+// R_armor2world   = R_gimbal2world * R_armor2gimbal（云台系旋转向量 → 世界系）
+cv::Vec3d r_world  = vision::rotationGimbalToWorld(r_gimbal, world_pose);
+// ZYX 欧拉角（yaw/pitch/roll，rad），同 tongji tools::eulers(R, 2, 1, 0)
+cv::Vec3d ypr = vision::rotationMatrixToYpr(R_armor2world);
+// 直角坐标 → 球坐标 (yaw, pitch, distance)
+cv::Vec3d ypd = vision::xyzToYpd(world_xyz);
+```
+
+- `solveArmorPose()` 在内部计算 `r_gimbal` 存入 `TargetPose`。
+- `printPoses()` 输出 `ypr_gimbal=(yaw,pitch,roll) deg`（恒有）与
+  `ypr_world=(…) deg`、`ypd_world=(yaw,pitch,distance)`（有世界位姿时）。
+- `rotationMatrixToYpr` 采用 ZYX 内旋（先绕 z 后绕 y 后绕 x）：`yaw=atan2(R10,R00)`、
+  `pitch=atan2(-R20,hypot(R21,R22))`、`roll=atan2(R21,R22)`。
+- `xyzToYpd`：`yaw=atan2(y,x)`、`pitch=atan2(z,hypot(x,y))`、`distance=norm`。
+- `drawAimHud(bgr, gimbal_yaw, gimbal_pitch, has_target, target_aim, dist)`：
+  - 左上角 HUD 文本：`gimbal yaw/pitch`（来自曝光同步 `cf.gimbal`）。
+  - 有目标时：`target yaw/pitch dist` + 绿色圆环/连线标记目标相对云台的角度偏差
+    （每度约 8 像素），无目标时显示 `target: none`。
+  - 画面中央画十字线 + 蓝色水平参考线。
+- `main.cpp`：目标角取卡尔曼滤波位置（`tracker.filtered`），无跟踪时取最近装甲板
+  PnP 坐标；主窗口与保存图都叠加该 HUD。
 
 ## 扩展建议
 
