@@ -428,9 +428,9 @@ void printMetadata(const TalosMetadataMapping& mapping) {
 // Stateful single-target Kalman tracker fusing per-frame PnP world coordinates.
 struct KalmanTracker {
   vision::KalmanFilter3D kf;
-  cv::Vec3d measurement;      // last raw PnP gimbal coordinate
-  cv::Vec3d filtered;         // last Kalman-filtered gimbal coordinate
-  cv::Vec3d velocity;         // Kalman velocity estimate
+  cv::Vec3d measurement;      // last raw PnP world (odom) coordinate
+  cv::Vec3d filtered;         // last Kalman-filtered world coordinate
+  cv::Vec3d velocity;         // Kalman velocity estimate (world frame)
   bool has_target = false;
   std::uint64_t last_seq = 0;
   std::uint64_t last_timestamp_ns = 0;
@@ -538,11 +538,14 @@ void printPoses(const std::vector<vision::TargetPose>& poses,
   }
 }
 
-// Update the Kalman tracker with this frame's poses. Picks the detected armor
-// nearest to the prediction (nearest to image center when starting up),
-// advances the constant-acceleration model by dt and fuses the observation.
-// Returns true and fills the tracker when a target is being followed.
+// Update the Kalman tracker with this frame's poses. Filtering happens in the
+// absolute world (odom) frame: the target's world position is unaffected by
+// gimbal rotation, so the velocity estimate stays stable and the gimbal does
+// not chase its own motion. Picks the detected armor nearest to the
+// prediction, advances the constant-acceleration model by dt and fuses the
+// observation. Returns true and fills the tracker when a target is followed.
 bool updateKalman(KalmanTracker& t, const std::vector<vision::TargetPose>& poses,
+                  const vision::GimbalWorldPose& world_pose,
                   std::uint64_t timestamp_ns, double default_dt) {
   // dt from exposure timestamps (nanoseconds).
   double dt = default_dt;
@@ -552,14 +555,20 @@ bool updateKalman(KalmanTracker& t, const std::vector<vision::TargetPose>& poses
   }
   t.last_timestamp_ns = timestamp_ns;
 
+  // Convert a pose's gimbal-frame position into the world frame.
+  const auto to_world = [&](const cv::Vec3d& p_gimbal) -> cv::Vec3d {
+    return world_pose.valid ? vision::gimbalToWorld(p_gimbal, world_pose)
+                            : p_gimbal;
+  };
+
   if (!t.has_target) {
-    // Start tracking the largest (nearest to image center) valid armor.
+    // Start tracking the closest valid armor (world frame).
     int best = -1;
-    double best_score = -1.0;
+    double best_score = 1e18;
     for (std::size_t i = 0; i < poses.size(); ++i) {
       if (!poses[i].valid) continue;
-      const double score = poses[i].t_gimbal[2];  // smallest depth = closest
-      if (best < 0 || score < best_score) {
+      const double score = to_world(poses[i].t_gimbal)[2];  // depth
+      if (score < best_score) {
         best_score = score;
         best = static_cast<int>(i);
       }
@@ -568,13 +577,12 @@ bool updateKalman(KalmanTracker& t, const std::vector<vision::TargetPose>& poses
       t.lost_frames = 0;
       return false;
     }
-    t.measurement = poses[best].t_gimbal;
+    t.measurement = to_world(poses[best].t_gimbal);
     t.kf.init(t.measurement, dt);
     t.filtered = t.measurement;
     t.velocity = cv::Vec3d(0, 0, 0);
     t.has_target = true;
     t.lost_frames = 0;
-    t.last_seq = 0;
     return true;
   }
 
@@ -582,12 +590,12 @@ bool updateKalman(KalmanTracker& t, const std::vector<vision::TargetPose>& poses
   t.kf.predict(dt);
   const cv::Vec3d predicted = t.kf.predictedPosition();
 
-  // Associate the pose closest to the prediction.
+  // Associate the pose closest to the prediction (world frame).
   int best = -1;
   double best_dist = 1e18;
   for (std::size_t i = 0; i < poses.size(); ++i) {
     if (!poses[i].valid) continue;
-    const double d = cv::norm(poses[i].t_gimbal - predicted);
+    const double d = cv::norm(to_world(poses[i].t_gimbal) - predicted);
     if (d < best_dist) {
       best_dist = d;
       best = static_cast<int>(i);
@@ -595,7 +603,7 @@ bool updateKalman(KalmanTracker& t, const std::vector<vision::TargetPose>& poses
   }
 
   if (best >= 0 && best_dist < 2.0) {  // gate: < 2 m from prediction
-    t.measurement = poses[best].t_gimbal;
+    t.measurement = to_world(poses[best].t_gimbal);
     if (t.kf.update(t.measurement)) {
       t.filtered = t.kf.position();
       t.velocity = t.kf.velocity();
@@ -821,14 +829,6 @@ int main(int argc, char** argv) {
       std::vector<vision::TargetPose> poses =
           computePoses(det, camera_intrinsics, camera_extrinsics,
                        o.armor_width, o.armor_height);
-      // debug: dump armor vertices for NN detections
-      for (std::size_t ai = 0; ai < det.armors.size() && ai < 2; ++ai) {
-        const auto& a = det.armors[ai];
-        std::cout << "  armor[" << ai << "] v0=(" << a.vertex[0].x << "," << a.vertex[0].y
-                  << ") v1=(" << a.vertex[1].x << "," << a.vertex[1].y
-                  << ") v2=(" << a.vertex[2].x << "," << a.vertex[2].y
-                  << ") v3=(" << a.vertex[3].x << "," << a.vertex[3].y << ")\n";
-      }
       vision::GimbalWorldPose world_pose =
           readGimbalWorldPose(metadata_mapping, h.source_sequence);
       printPoses(poses, world_pose);
@@ -839,8 +839,8 @@ int main(int argc, char** argv) {
         tracker.kf.process_vel_sigma = o.kf_vel_sigma;
         tracker.kf.process_acc_sigma = o.kf_acc_sigma;
         tracker.kf.measurement_sigma = o.kf_meas_sigma;
-        kalman_active = updateKalman(tracker, poses, h.capture_timestamp_ns,
-                                     1.0 / 60.0);
+        kalman_active = updateKalman(tracker, poses, world_pose,
+                                     h.capture_timestamp_ns, 1.0 / 60.0);
         if (kalman_active) {
           const cv::Vec3d& r = tracker.measurement;
           const cv::Vec3d& f = tracker.filtered;
@@ -852,10 +852,17 @@ int main(int argc, char** argv) {
                     << " vel=(" << v[0] << ", " << v[1] << ", " << v[2]
                     << ") m/s"
                     << " lost=" << tracker.lost_frames;
-          const cv::Vec2d abs_aim =
-              vision::absoluteAimAngles(vision::gimbalToCamera(tracker.measurement, camera_extrinsics), g.yaw_deg, g.pitch_deg, camera_tilt_deg);
-          std::cout << " aim_yaw=" << std::fixed << std::setprecision(2)
-                    << abs_aim[0] << " aim_pitch=" << abs_aim[1] << "\n";
+          // 瞄准角用滤波后的世界坐标：world -> gimbal -> camera。
+          if (world_pose.valid) {
+            const cv::Vec3d f_cam =
+                vision::gimbalToCamera(vision::worldToGimbal(f, world_pose),
+                                       camera_extrinsics);
+            const cv::Vec2d abs_aim = vision::absoluteAimAngles(
+                f_cam, g.yaw_deg, g.pitch_deg, camera_tilt_deg);
+            std::cout << " aim_yaw=" << std::fixed << std::setprecision(2)
+                      << abs_aim[0] << " aim_pitch=" << abs_aim[1];
+          }
+          std::cout << "\n";
         }
       }
 
@@ -880,11 +887,13 @@ int main(int argc, char** argv) {
                           cv::Scalar(0, 255, 255), 2, cv::LINE_AA);
             }
           }
-          if (kalman_active) {
-            // Project the filtered gimbal position back into the image and
+          if (kalman_active && world_pose.valid) {
+            // Project the filtered world position back into the image and
             // draw a green cross (raw PnP label is yellow).
             const cv::Vec3d p_cam =
-                vision::gimbalToCamera(tracker.filtered, camera_extrinsics);
+                vision::gimbalToCamera(
+                    vision::worldToGimbal(tracker.filtered, world_pose),
+                    camera_extrinsics);
             const cv::Point2f p =
                 vision::projectPoint(p_cam, camera_intrinsics);
             if (p.x > 0 && p.y > 0) {
@@ -901,13 +910,18 @@ int main(int argc, char** argv) {
             }
           }
           // Aiming HUD: current gimbal angles + target aim (from the Kalman
-          // filtered position when active, otherwise the closest raw pose).
+          // filtered world position when active, otherwise the closest raw pose).
           cv::Vec2d target_aim(0.0, 90.0);
           double target_dist = 0.0;
           bool hud_target = false;
-          if (kalman_active) {
-            target_aim = vision::absoluteAimAngles(vision::gimbalToCamera(tracker.measurement, camera_extrinsics), g.yaw_deg, g.pitch_deg, camera_tilt_deg);
-            target_dist = cv::norm(tracker.measurement);
+          if (kalman_active && world_pose.valid) {
+            const cv::Vec3d f_cam =
+                vision::gimbalToCamera(
+                    vision::worldToGimbal(tracker.filtered, world_pose),
+                    camera_extrinsics);
+            target_aim = vision::absoluteAimAngles(f_cam, g.yaw_deg, g.pitch_deg,
+                                                   camera_tilt_deg);
+            target_dist = cv::norm(tracker.filtered);
             hud_target = true;
           } else if (camera_intrinsics.fx > 0.0 && !poses.empty()) {
             for (const auto& p : poses) {
@@ -953,9 +967,11 @@ int main(int argc, char** argv) {
                         cv::Scalar(0, 255, 255), 2, cv::LINE_AA);
           }
         }
-        if (kalman_active) {
+        if (kalman_active && world_pose.valid) {
           const cv::Vec3d p_cam =
-              vision::gimbalToCamera(tracker.filtered, camera_extrinsics);
+              vision::gimbalToCamera(
+                  vision::worldToGimbal(tracker.filtered, world_pose),
+                  camera_extrinsics);
           const cv::Point2f p =
               vision::projectPoint(p_cam, camera_intrinsics);
           if (p.x > 0 && p.y > 0) {
@@ -974,9 +990,14 @@ int main(int argc, char** argv) {
           cv::Vec2d target_aim(0.0, 90.0);
           double target_dist = 0.0;
           bool hud_target = false;
-          if (kalman_active) {
-            target_aim = vision::absoluteAimAngles(vision::gimbalToCamera(tracker.measurement, camera_extrinsics), g.yaw_deg, g.pitch_deg, camera_tilt_deg);
-            target_dist = cv::norm(tracker.measurement);
+          if (kalman_active && world_pose.valid) {
+            const cv::Vec3d f_cam =
+                vision::gimbalToCamera(
+                    vision::worldToGimbal(tracker.filtered, world_pose),
+                    camera_extrinsics);
+            target_aim = vision::absoluteAimAngles(f_cam, g.yaw_deg, g.pitch_deg,
+                                                   camera_tilt_deg);
+            target_dist = cv::norm(tracker.filtered);
             hud_target = true;
           } else if (camera_intrinsics.fx > 0.0 && !poses.empty()) {
             for (const auto& p : poses) {

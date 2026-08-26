@@ -41,15 +41,19 @@ cv::Vec3d predictAhead(const cv::Vec3d& pos, const cv::Vec3d& vel,
 
 AimSolution planAimPoint(const cv::Vec3d& pos, const cv::Vec3d& vel,
                          const cv::Vec3d& acc, double bullet_speed,
-                         int max_iter, double tol_s) {
+                         double fire_delay_s, int max_iter, double tol_s) {
   AimSolution out;
   if (bullet_speed <= 0.0) return out;
+  if (fire_delay_s < 0.0) fire_delay_s = 0.0;
 
   // Initial guess: aim at current position, flight time = distance/v0.
   double fly_time = cv::norm(pos) / bullet_speed;
 
   for (int i = 0; i < max_iter; ++i) {
-    const cv::Vec3d predicted = predictAhead(pos, vel, acc, fly_time);
+    // Predict where the target will be when the projectile arrives:
+    // t = fire_delay (command latency) + fly_time (ballistic time of flight).
+    const double t = fire_delay_s + fly_time;
+    const cv::Vec3d predicted = predictAhead(pos, vel, acc, t);
     const double d = std::hypot(predicted[0], predicted[2]);  // horizontal
     const double h = predicted[1];                           // height (world +Y up)
     const BallisticSolution sol = solveBallistic(bullet_speed, d, h);
@@ -67,7 +71,8 @@ AimSolution planAimPoint(const cv::Vec3d& pos, const cv::Vec3d& vel,
   }
 
   // Accept the last iterate even if not fully converged.
-  const cv::Vec3d predicted = predictAhead(pos, vel, acc, fly_time);
+  const double t = fire_delay_s + fly_time;
+  const cv::Vec3d predicted = predictAhead(pos, vel, acc, t);
   const double d = std::hypot(predicted[0], predicted[2]);
   const double h = predicted[1];
   const BallisticSolution sol = solveBallistic(bullet_speed, d, h);

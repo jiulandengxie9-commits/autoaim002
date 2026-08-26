@@ -22,6 +22,7 @@
 
 #include <daedalus_sim_sdk/contest_client.hpp>
 #include <daedalus_sim_sdk/scene_control_client.hpp>
+#include <daedalus_sim_sdk/talos_metadata_reader.hpp>
 
 #include "detector.hpp"
 #include "planning.hpp"
@@ -62,6 +63,7 @@ struct Options {
   bool set_motion = true;  // 跳过靶车运动设置（用于静止靶车验证）
   std::string window_title = "AutoAim Test";
   double bullet_speed = 25.0;  // 比赛版弹丸初速 25 m/s
+  double fire_delay = 0.0;     // 开火延迟（命令到实际发射），秒，可调
   detect::Backend detector_backend = detect::Backend::NeuralNetwork;  // 默认神经网络
   std::string nn_model_path = "/home/xqy/桌面/tongji/assets/yolo11.xml";
   vision::LightColor color = vision::LightColor::Red;  // 模拟器敌方装甲板为红色灯条
@@ -133,6 +135,9 @@ void printUsage(const char* argv0) {
       << "                      the simulator's enemy armor light bars)\n"
       << "  --bullet-speed M/S  projectile muzzle speed in m/s (default 25.0;\n"
       << "                      gravity drop is compensated with this)\n"
+      << "  --fire-delay SEC    fixed command-to-shot latency in seconds\n"
+      << "                      (gimbal response + firing delay) used to lead\n"
+      << "                      the target; default 0 (default 0.0)\n"
       << "  --detector NAME     detector backend: traditional | nn (default nn,\n"
       << "                      the YOLO neural network via OpenVINO)\n"
       << "  --nn-model PATH     OpenVINO/ONNX model for --detector nn (default\n"
@@ -257,6 +262,12 @@ Options parseArgs(int argc, char** argv) {
         std::cerr << "--bullet-speed must be positive\n";
         std::exit(2);
       }
+    } else if (arg == "--fire-delay") {
+      o.fire_delay = std::strtod(next("--fire-delay").c_str(), nullptr);
+      if (o.fire_delay < 0.0) {
+        std::cerr << "--fire-delay must be >= 0\n";
+        std::exit(2);
+      }
     } else if (arg == "--detector") {
       const std::string name = next("--detector");
       if (name == "traditional") {
@@ -301,6 +312,27 @@ struct ConditionStats {
 };
 
 }  // namespace
+
+// Read the exposure-synced gimbal world (odom) pose for a frame sequence.
+// Needed to filter/plan in the world frame so gimbal rotation does not corrupt
+// the target velocity estimate (the cause of gimbal oscillation).
+vision::GimbalWorldPose readGimbalWorldPose(
+    const TalosMetadataMapping& mapping, std::uint64_t frame_seq) {
+  vision::GimbalWorldPose pose;
+  auto reader_res = mapping.reader();
+  if (!reader_res.ok()) return pose;
+  const TalosMetadataReader& reader = *reader_res.value;
+  auto exp = reader.readExposureStateForFrame(frame_seq);
+  if (!exp.ok() || !exp.value) return pose;
+  const ExposureState& es = *exp.value;
+  pose.valid = true;
+  for (int i = 0; i < 3; ++i) {
+    pose.position_m[i] = es.gimbal_position_world[i];
+    pose.quaternion_wxyz[i] = es.gimbal_quaternion_world_wxyz[i];
+  }
+  pose.quaternion_wxyz[3] = es.gimbal_quaternion_world_wxyz[3];
+  return pose;
+}
 
 int main(int argc, char** argv) {
   const Options o = parseArgs(argc, argv);
@@ -360,6 +392,18 @@ int main(int argc, char** argv) {
               << " cx=" << intrinsics.cx << " cy=" << intrinsics.cy
               << " (from " << o.calibration_path << ")\n";
   }
+
+  // 元数据映射：读每帧云台世界位姿，用于世界系滤波/规划。
+  TalosMetadataMapping metadata_mapping;
+  const std::string meta_path =
+      o.ipc_directory + "/" + std::string(kMetaFileName);
+  {
+    const ClientStatus ms = metadata_mapping.open(meta_path);
+    if (!ms.ok()) {
+      std::cerr << "metadata: could not open " << meta_path << " ("
+                << ms.message << ")\n";
+    }
+  }
   const double camera_tilt_deg =
       2.0 * std::acos(std::clamp(extrinsics.quaternion_xyzw[3], -1.0, 1.0)) *
       180.0 / CV_PI;
@@ -376,6 +420,7 @@ int main(int argc, char** argv) {
             << " fire=" << (o.fire ? "on" : "off")
             << " color=" << (o.color == vision::LightColor::Blue ? "blue" : "red")
             << " bullet_speed=" << o.bullet_speed << " m/s"
+            << " fire_delay=" << o.fire_delay << " s"
             << " armor=" << o.armor_width << "x" << o.armor_height << " m"
             << "\n\n";
 
@@ -415,7 +460,7 @@ int main(int argc, char** argv) {
     ConditionStats st;
     std::uint64_t last_seq = 0;
     int lock_streak = 0;               // 连续锁定帧数（开火前需稳定）
-    const int lock_warmup_frames = 8;  // 云台收敛后再开火
+    const int lock_warmup_frames = 3;  // 云台收敛后再开火（降低防卡住）
     std::uint32_t hit_count_initial = 0;
     {
       auto hit0 = sim.getLatestArmorHit();
@@ -423,11 +468,16 @@ int main(int argc, char** argv) {
         hit_count_initial = hit0.value->accurate_count;
       }
     }
-    // 目标运动估计（参考 tongji Tracker：用历史位置估计速度/加速度做提前量）。
+    // 目标运动估计：世界系 Kalman（pos/vel/acc），抑制 NN 检测抖动。
+    vision::KalmanFilter3D track_kf;
+    track_kf.process_pos_sigma = 0.005;
+    track_kf.process_vel_sigma = 0.05;
+    track_kf.process_acc_sigma = 0.2;
+    track_kf.measurement_sigma = 0.15;
+    bool kf_inited = false;
     cv::Vec3d track_pos, track_vel(0, 0, 0), track_acc(0, 0, 0);
-    cv::Vec3d prev_pos(0, 0, 0), prev2_pos(0, 0, 0);
-    bool have_prev = false, have_prev2 = false;
     std::uint64_t prev_ts = 0;
+    cv::Vec2d smooth_aim(0.0, 90.0);  // 云台命令低通，抑制检测抖动导致乱动
     const auto t0 = std::chrono::steady_clock::now();
     double fire_cooldown_s = 0.06;  // ~16 发/s（模拟器射击冷却）
     auto last_fire = t0;
@@ -493,34 +543,40 @@ int main(int argc, char** argv) {
       cv::Vec2d aim(0.0, 90.0);
       double aim_dist = 0.0;
       if (have_best) {
-        // 更新目标运动估计（有限差分速度/加速度 + 简单低通）。
-        const cv::Vec3d cur = best.t_gimbal;
+        // 用每帧云台世界位姿把目标转到世界（odom）系，再经 Kalman 平滑。
+        // 关键：云台转动不影响目标世界坐标，Kalman 速度估计不会被云台运动污染。
+        const vision::GimbalWorldPose wp =
+            readGimbalWorldPose(metadata_mapping, cf.image.header.source_sequence);
+        const cv::Vec3d cur_w =
+            wp.valid ? vision::gimbalToWorld(best.t_gimbal, wp)
+                     : best.t_gimbal;
         const std::uint64_t ts = cf.image.header.capture_timestamp_ns;
         const double dt = prev_ts ? (ts - prev_ts) * 1e-9 : 0.0;
-        if (have_prev && dt > 0.0 && dt < 0.5) {
-          const cv::Vec3d inst_vel = (cur - prev_pos) / dt;
-          track_vel = track_vel * 0.7 + inst_vel * 0.3;
-          if (have_prev2 && dt > 0.0) {
-            const cv::Vec3d inst_acc =
-                ((cur - prev_pos) / dt - (prev_pos - prev2_pos) / dt) / dt;
-            track_acc = track_acc * 0.8 + inst_acc * 0.2;
-          }
-          prev2_pos = prev_pos;
-          have_prev2 = true;
+        const double kf_dt = (dt > 0.0 && dt < 0.5) ? dt : 1.0 / 60.0;
+        if (!kf_inited) {
+          track_kf.init(cur_w, kf_dt);
+          kf_inited = true;
+        } else {
+          track_kf.predict(kf_dt);
+          track_kf.update(cur_w);
         }
-        track_pos = cur;
-        prev_pos = cur;
-        have_prev = true;
+        track_pos = track_kf.position();
+        track_vel = track_kf.velocity();
         prev_ts = ts;
 
-        // 规划器：预测提前量 + 弹道解算（参考 tongji Aimer::aim 的迭代求解）。
+        // 规划器：在世界系预测提前量 + 弹道解算。
+        // 预测时刻 = 开火延迟(fire_delay) + 弹丸飞行时间。
         const planning::AimSolution sol =
             planning::planAimPoint(track_pos, track_vel, track_acc,
-                                   o.bullet_speed);
-        if (sol.valid) {
-          // 瞄准点在云台系；转相机系后算云台绝对角。
-          const cv::Vec3d aim_cam = vision::gimbalToCamera(sol.aim_point, extrinsics);
-          aim = vision::absoluteAimAngles(aim_cam, yaw, pitch, camera_tilt_deg);
+                                   o.bullet_speed, o.fire_delay);
+        if (sol.valid && wp.valid) {
+          // 世界系瞄准点 -> 云台系。目标在云台系的方向角即命令角：
+          // yaw = atan2(x, z)，pitch = 90 + atan2(y, hypot(x,z))（SDK 约定）。
+          // 云台系已随云台转动，故无需叠加当前云台角（避免双积分振荡）。
+          const cv::Vec3d p_g = vision::worldToGimbal(sol.aim_point, wp);
+          aim[0] = std::atan2(p_g[0], p_g[2]) * 180.0 / CV_PI;
+          aim[1] = 90.0 +
+                   std::atan2(p_g[1], std::hypot(p_g[0], p_g[2])) * 180.0 / CV_PI;
           aim_dist = sol.distance_m;
         } else {
           aim = vision::aimWithGravity(best.t_cam, yaw, pitch, camera_tilt_deg,
@@ -577,9 +633,18 @@ int main(int argc, char** argv) {
       ++lock_streak;
       if (lock_streak < lock_warmup_frames) continue;
 
+      // 云台命令低通：避免检测框抖动导致 aim 跳变、云台乱动。
+      const double alpha = 0.35;  // 新命令权重（越小越平滑）
+      if (have_best) {
+        smooth_aim = cv::Vec2d(smooth_aim[0] * (1.0 - alpha) + aim[0] * alpha,
+                               smooth_aim[1] * (1.0 - alpha) + aim[1] * alpha);
+      } else {
+        smooth_aim = aim;  // 无目标直接用（保持最后角度）
+      }
+
       UdpGimbalCommand cmd;
-      cmd.yaw_deg = static_cast<float>(aim[0]);
-      cmd.pitch_deg = static_cast<float>(aim[1]);
+      cmd.yaw_deg = static_cast<float>(smooth_aim[0]);
+      cmd.pitch_deg = static_cast<float>(smooth_aim[1]);
       cmd.distance_m = static_cast<float>(best.distance_m);
       cmd.fire_advice = o.fire;
 

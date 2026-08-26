@@ -77,7 +77,9 @@ autoaim002/
     ├── vision_processing.hpp   # 纯视觉处理模块声明（形态学 + 灯条/装甲板识别 + PnP + 卡尔曼）
     └── vision_processing.cpp   # 纯视觉处理模块实现
 └── tools/
-    └── ov_armor_service.py     # OpenVINO 神经网络检测子进程服务
+    ├── ov_armor_service.py     # OpenVINO 神经网络检测子进程服务
+    ├── plot_pnp.py             # 单次 PnP 曲线画图（camera/gimbal/world/距离/框/数量）
+    └── plot_pnp_compare.py     # 多份 CSV 对比画图（raw vs Kalman、距离、抖动）
 ```
 
 `src/vision_processing.*` 是**纯图像处理**模块：只接收 `cv::Mat` 与标定参数，
@@ -379,12 +381,16 @@ OpenCV 光学系（+Z 朝前、+X 朝右、+Y 朝下），云台系为世界系�
 （默认 50）。
 
 ```bash
-./build/autoaim002_test [--ipc-dir DIR] [--rounds 50] [--only N] [--no-fire] [--color red|blue] [--no-window]
+./build/autoaim002_test [--ipc-dir DIR] [--rounds 50] [--only N] [--no-fire] [--color red|blue] [--no-window] [--bullet-speed 25] [--fire-delay 0.1]
 ```
 
 - 默认检测**红色**灯条（模拟器敌方装甲板灯条为红色）；`--color blue` 切蓝色。
 - 默认弹出 **AutoAim Test** 可视化窗口，实时显示检测框、目标中心十字、瞄准 HUD
   （当前云台角/目标瞄准角/距离）与工况进度；`--no-window` 关闭（无图形环境自动降级）。
+- **规划器提前量**：`planAimPoint()` 预测目标在 `开火延迟 + 弹丸飞行时间` 时刻的
+  位置并解算弹道俯仰（参考 `tongji Aimer::aim` 的迭代）。`--bullet-speed` 设弹速
+  （默认 25 m/s，规则固定值）；`--fire-delay SEC` 设命令到实际发射的固定延迟
+  （云台响应 + 发弹机构，参考 tongji `low/high_speed_delay_time`），用于提前量。
 - 输出每工况 `locked=`（锁定帧数）、`rounds_fired=N/50`、`score_estimate`。
 - 由于 SDK 为只读数据源、不提供靶场装甲板命中真值，`score_estimate` 用
   `rounds_fired/50 × 满分` 作命中率代理；实际命中需裁判系统接入。
@@ -393,6 +399,33 @@ OpenCV 光学系（+Z 朝前、+X 朝右、+Y 朝下），云台系为世界系�
 
 **与主程序的关系**：两者共用 `vision_processing.*` 的检测/PnP/瞄准逻辑；主程序
 `autoaim002` 侧重可视化调试，测试工具侧重自动跑分。
+
+## 识别 + PnP 曲线测试（pnp_curve_test）
+
+`src/pnp_curve_test.cpp` 编译为 `build/pnp_curve_test`：**仅做识别与 PnP 解算**，
+不做云台控制/开火，把每帧检测到的装甲板 PnP 结果写入 CSV，供脚本画曲线图评估
+识别稳定性、PnP 抖动与 Kalman 平滑效果。
+
+```bash
+./build/pnp_curve_test --frames 200 --out /tmp/pnp_curve.csv      # 默认 NN 检测
+./build/pnp_curve_test --show --out /tmp/pnp_curve.csv            # 实时窗口显示识别框
+./build/pnp_curve_test --detector traditional --out out.csv       # 传统视觉对比
+```
+
+- `--show`：弹出 OpenCV 窗口实时绘制检测框（蓝）+ 最近目标中心（绿）与 PnP
+  距离/世界坐标标签；按 `q`/ESC 提前结束。
+- CSV 每帧一行：`seq, t_ns, n_armors, best_cam_xyz, best_g_xyz, best_w_xyz,
+  best_dist, kf_xyz, box_cx/cy/w/h`（best=最近目标，kf=世界系 Kalman 平滑）。
+
+**画图脚本**：
+
+```bash
+python3 tools/plot_pnp.py /tmp/pnp_curve.csv /tmp/pnp_curve_plots   # 单份曲线
+python3 tools/plot_pnp_compare.py [csv1 csv2 ...] [out_dir]         # 多份对比
+```
+
+- `plot_pnp.py`：camera/gimbal/world 坐标、距离、检测框、每帧装甲板数。
+- `plot_pnp_compare.py`：raw vs Kalman 世界坐标对比、多工况距离/抖动对比。
 
 ## 说明与限制
 

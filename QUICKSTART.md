@@ -123,6 +123,9 @@ kf: raw=(0.01, 0.01, 3.02) filtered=(0.00, 0.00, 3.00) vel=(0.10, 0.02, -0.01) m
 - `--detector nn|traditional`：切换检测后端——`nn`（默认，OpenVINO 神经网络，
   需 `python3 -m pip install --break-system-packages openvino`）、`traditional`
   （形态学+灯条配对）。NN 后端启动 Python 子进程推理。
+- `--bullet-speed M/S`：弹丸初速（默认 25 m/s，规则固定值），用于弹道俯仰补偿。
+- `--fire-delay SEC`：开火延迟（命令到实际发射的固定延迟），用于规划器提前量；
+  目标运动时调大该值会多打提前量（参考 tongji `low/high_speed_delay_time`）。
 - `--no-kalman`：关闭卡尔曼滤波（默认开启）。调参示例：
   - 目标抖动明显 → 增大 `--kf-meas-sigma`（观测噪声，默认 0.03）。
   - 目标快速变速 → 增大 `--kf-acc-sigma`（加速度过程噪声，默认 0.2）。

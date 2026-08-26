@@ -32,9 +32,12 @@ struct AimSolution {
 };
 
 // Iterate prediction <-> ballistic flight time (like tongji Aimer::aim's
-// 10-iteration loop). Returns the converged aim solution.
+// 10-iteration loop). `fire_delay_s` is the fixed command-to-shot latency
+// (gimbal response + firing mechanism), so the target is predicted at
+// t = fire_delay + flight_time — the instant the projectile actually arrives.
 AimSolution planAimPoint(const cv::Vec3d& pos, const cv::Vec3d& vel,
                          const cv::Vec3d& acc, double bullet_speed,
-                         int max_iter = 10, double tol_s = 0.001);
+                         double fire_delay_s = 0.0, int max_iter = 10,
+                         double tol_s = 0.001);
 
 }  // namespace planning

@@ -39,4 +39,11 @@ target_link_libraries(autoaim002_test PRIVATE
     ${OpenCV_LIBS}
     Threads::Threads)
 
+# 识别 + PnP 曲线测试工具：仅检测/PnP，输出 CSV 供画图。
+add_executable(pnp_curve_test src/pnp_curve_test.cpp src/vision_processing.cpp src/planning.cpp src/detector.cpp)
+target_link_libraries(pnp_curve_test PRIVATE
+    DaedalusSimSdk::DaedalusSimSdk
+    ${OpenCV_LIBS}
+    Threads::Threads)
+
 install(TARGETS autoaim002 autoaim002_test RUNTIME DESTINATION bin)

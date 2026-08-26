@@ -205,6 +205,10 @@ cv::Vec2d aimWithGravity(const cv::Vec3d& p_cam, double gimbal_yaw_deg,
 cv::Vec3d gimbalToWorld(const cv::Vec3d& p_gimbal,
                         const GimbalWorldPose& pose);
 
+// Inverse of gimbalToWorld: world (odom) frame -> gimbal frame.
+cv::Vec3d worldToGimbal(const cv::Vec3d& p_world,
+                        const GimbalWorldPose& pose);
+
 // Draw an aiming HUD on a BGR image: current gimbal angles, the absolute
 // gimbal yaw/pitch needed to aim at the target (target_aim, from
 // absoluteAimAngles) and distance, plus a center crosshair and a horizontal

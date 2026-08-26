@@ -386,8 +386,12 @@ cv::Vec2d absoluteAimAngles(const cv::Vec3d& p_cam, double gimbal_yaw_deg,
   // +y down, +z forward). The horizontal (yaw) offset is measured
   // perpendicular to the camera tilt axis and is scaled by cos(tilt); the
   // vertical (pitch) offset lies along the tilt axis and is not scaled.
+  // A target to the RIGHT (+x) must turn the gimbal to larger yaw, so the
+  // yaw offset is ADDED (no leading minus). A target BELOW (+y) needs the
+  // gimbal to pitch down (pitch_deg decreases from 90 at level), so the
+  // pitch offset is SUBTRACTED.
   const double yaw_offset =
-      -std::cos(camera_tilt_deg * CV_PI / 180.0) * std::atan2(x, z) * 180.0 / CV_PI;
+      std::cos(camera_tilt_deg * CV_PI / 180.0) * std::atan2(x, z) * 180.0 / CV_PI;
   const double pitch_offset = -std::atan2(y, h) * 180.0 / CV_PI;
 
   return cv::Vec2d(gimbal_yaw_deg + yaw_offset,
@@ -430,6 +434,17 @@ cv::Vec3d gimbalToWorld(const cv::Vec3d& p_gimbal,
   const cv::Vec3d t(pose.position_m[0], pose.position_m[1],
                     pose.position_m[2]);
   return R * p_gimbal + t;
+}
+
+cv::Vec3d worldToGimbal(const cv::Vec3d& p_world,
+                        const GimbalWorldPose& pose) {
+  const cv::Matx33d R = quatWxyzToRot(pose.quaternion_wxyz[0],
+                                      pose.quaternion_wxyz[1],
+                                      pose.quaternion_wxyz[2],
+                                      pose.quaternion_wxyz[3]);
+  const cv::Vec3d t(pose.position_m[0], pose.position_m[1],
+                    pose.position_m[2]);
+  return R.t() * (p_world - t);
 }
 
 cv::Vec3d rotationCameraToGimbal(const cv::Vec3d& rvec_cam,
