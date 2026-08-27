@@ -564,13 +564,11 @@ bool updateKalman(KalmanTracker& t, const std::vector<vision::TargetPose>& poses
   }
   t.last_timestamp_ns = timestamp_ns;
 
-  // PnP gives target_camera. Prefer the simulator's same-frame camera pose
-  // for camera -> world; this avoids mixing fixed extrinsics with a second
-  // world-pose transform.
+  // PnP gives target_camera. The primary chain is the one used by the
+  // application model: camera -> fixed gimbal extrinsic -> world pose.
+  // The simulator camera world pose is intentionally not used here; it is
+  // displayed separately as a diagnostic comparison.
   const auto to_world = [&](const vision::TargetPose& pose) -> cv::Vec3d {
-    if (world_pose.valid && world_pose.camera_valid) {
-      return vision::cameraToWorld(pose.t_cam, world_pose);
-    }
     return world_pose.valid ? vision::gimbalToWorld(pose.t_gimbal, world_pose)
                             : pose.t_gimbal;
   };
@@ -889,6 +887,10 @@ int main(int argc, char** argv) {
       bool hud_target = false;
       cv::Vec3d target_world(0.0, 0.0, 0.0);
       bool hud_world_target = false;
+      cv::Vec3d target_camera(0.0, 0.0, 0.0);
+      cv::Vec3d target_gimbal(0.0, 0.0, 0.0);
+      cv::Vec3d target_world_sdk(0.0, 0.0, 0.0);
+      bool hud_coordinate_target = false;
       if (kalman_active && world_pose.valid) {
         target_world = tracker.filtered;
         target_aim = vision::absoluteWorldAimAngles(target_world, world_pose);
@@ -897,15 +899,29 @@ int main(int argc, char** argv) {
             world_pose.position_m[2]));
         hud_target = true;
         hud_world_target = true;
+        for (const auto& p : poses) {
+          if (!p.valid) continue;
+          target_camera = p.t_cam;
+          target_gimbal = p.t_gimbal;
+          target_world_sdk = world_pose.camera_valid
+                                 ? vision::cameraToWorld(p.t_cam, world_pose)
+                                 : target_world;
+          hud_coordinate_target = true;
+          break;
+        }
       } else if (camera_intrinsics.fx > 0.0) {
         for (const auto& p : poses) {
           if (!p.valid) continue;
+          target_camera = p.t_cam;
+          target_gimbal = p.t_gimbal;
           if (world_pose.valid) {
-            target_world = (world_pose.camera_valid)
-                               ? vision::cameraToWorld(p.t_cam, world_pose)
-                               : vision::gimbalToWorld(p.t_gimbal, world_pose);
+            target_world = vision::gimbalToWorld(p.t_gimbal, world_pose);
             target_aim = vision::absoluteWorldAimAngles(target_world, world_pose);
             hud_world_target = true;
+            target_world_sdk = world_pose.camera_valid
+                                   ? vision::cameraToWorld(p.t_cam, world_pose)
+                                   : target_world;
+            hud_coordinate_target = true;
           } else {
             target_aim = vision::absoluteAimAngles(
                 p.t_gimbal, g.yaw_deg, g.pitch_deg, camera_tilt_deg);
@@ -976,6 +992,9 @@ int main(int argc, char** argv) {
                              target_aim, target_dist, hud_world_target,
                              target_world, o.send_commands, hud_target,
                              target_aim, target_dist);
+          vision::drawCoordinateHud(display, hud_coordinate_target,
+                                    target_camera, target_gimbal, target_world,
+                                    target_world_sdk);
 
           cv::imshow(o.window_title, display);
           cv::imshow("Morphology Stages",
@@ -1032,6 +1051,8 @@ int main(int argc, char** argv) {
                            target_aim, target_dist, hud_world_target,
                            target_world, o.send_commands, hud_target,
                            target_aim, target_dist);
+        vision::drawCoordinateHud(saved, hud_coordinate_target, target_camera,
+                                  target_gimbal, target_world, target_world_sdk);
         cv::imwrite(o.save_dir + "/result.png", saved);
       }
 

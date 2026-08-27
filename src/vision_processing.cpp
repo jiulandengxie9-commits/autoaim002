@@ -642,6 +642,35 @@ void drawAimHud(cv::Mat& bgr, double gimbal_yaw_deg, double gimbal_pitch_deg,
               send_enabled ? target_color : dim, 1, cv::LINE_AA);
 }
 
+void drawCoordinateHud(cv::Mat& bgr, bool valid,
+                       const cv::Vec3d& target_camera,
+                       const cv::Vec3d& target_gimbal,
+                       const cv::Vec3d& target_world_fixed,
+                       const cv::Vec3d& target_world_sdk) {
+  if (!valid) return;
+  char line[192];
+  const int x = 12;
+  const int y = 124;
+  std::snprintf(line, sizeof(line), "cam=(%.3f, %.3f, %.3f) m",
+                target_camera[0], target_camera[1], target_camera[2]);
+  cv::putText(bgr, line, cv::Point(x, y), cv::FONT_HERSHEY_SIMPLEX, 0.50,
+              cv::Scalar(255, 255, 0), 1, cv::LINE_AA);
+  std::snprintf(line, sizeof(line), "gimbal=(%.3f, %.3f, %.3f) m",
+                target_gimbal[0], target_gimbal[1], target_gimbal[2]);
+  cv::putText(bgr, line, cv::Point(x, y + 22), cv::FONT_HERSHEY_SIMPLEX, 0.50,
+              cv::Scalar(255, 255, 0), 1, cv::LINE_AA);
+  std::snprintf(line, sizeof(line), "world_fixed=(%.3f, %.3f, %.3f) m",
+                target_world_fixed[0], target_world_fixed[1],
+                target_world_fixed[2]);
+  cv::putText(bgr, line, cv::Point(x, y + 44), cv::FONT_HERSHEY_SIMPLEX, 0.50,
+              cv::Scalar(0, 255, 0), 1, cv::LINE_AA);
+  std::snprintf(line, sizeof(line), "world_sdk=(%.3f, %.3f, %.3f) err=%.3f m",
+                target_world_sdk[0], target_world_sdk[1], target_world_sdk[2],
+                cv::norm(target_world_fixed - target_world_sdk));
+  cv::putText(bgr, line, cv::Point(x, y + 66), cv::FONT_HERSHEY_SIMPLEX, 0.50,
+              cv::Scalar(0, 165, 255), 1, cv::LINE_AA);
+}
+
 KalmanFilter3D::KalmanFilter3D() {
   Q_ = cv::Mat::zeros(9, 9, CV_64F);
   R_ = cv::Mat::zeros(3, 3, CV_64F);

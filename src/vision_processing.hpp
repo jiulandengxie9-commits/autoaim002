@@ -246,6 +246,13 @@ void drawAimHud(cv::Mat& bgr, double gimbal_yaw_deg, double gimbal_pitch_deg,
                 const cv::Vec2d& send_angles = cv::Vec2d(),
                 double send_distance_m = 0.0);
 
+// Draw the coordinate-chain diagnostics for the selected target.
+void drawCoordinateHud(cv::Mat& bgr, bool valid,
+                       const cv::Vec3d& target_camera,
+                       const cv::Vec3d& target_gimbal,
+                       const cv::Vec3d& target_world_fixed,
+                       const cv::Vec3d& target_world_sdk);
+
 // Linear Kalman filter for a 3D target position. State vector is
 // [x, y, z, vx, vy, vz, ax, ay, az] with a constant-acceleration model
 // (same A/H structure as big_homework.cpp's per-axis Kalman, but in 3D and
