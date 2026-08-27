@@ -579,7 +579,12 @@ int main(int argc, char** argv) {
                                    o.bullet_speed, o.fire_delay);
         if (sol.valid && wp.valid) {
           // sol.aim_point is already in simulator world coordinates.
-          aim = vision::absoluteWorldAimAngles(sol.aim_point, wp);
+          // Convert the planned world point into this exposure's gimbal
+          // frame before producing absolute SDK command angles.
+          const cv::Vec2d relative_aim = vision::gimbalRelativeAimAngles(
+              vision::worldToGimbal(sol.aim_point, wp));
+          aim = cv::Vec2d(yaw + relative_aim[0],
+                          pitch + relative_aim[1]);
           aim_world = sol.aim_point;
           have_aim_world = true;
           aim_dist = sol.distance_m;
