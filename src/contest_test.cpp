@@ -605,9 +605,14 @@ int main(int argc, char** argv) {
           const cv::Vec2d relative_aim = vision::cameraRelativeAimAngles(
               vision::gimbalToCamera(
                   vision::worldToGimbal(aim_world_point, wp), extrinsics));
+          const double line_of_sight_pitch = std::atan2(
+              target_relative[1],
+              std::hypot(target_relative[0], target_relative[2]));
+          const double gravity_pitch =
+              sol.pitch_rad - line_of_sight_pitch;
           aim = cv::Vec2d(yaw + relative_aim[0],
                           pitch + relative_aim[1] +
-                              sol.pitch_rad * 180.0 / CV_PI);
+                              gravity_pitch * 180.0 / CV_PI);
           aim_world = aim_world_point;
           have_aim_world = true;
           aim_dist = sol.distance_m;
