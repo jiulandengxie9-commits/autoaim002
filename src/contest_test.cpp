@@ -61,7 +61,7 @@ struct Options {
   bool fire = true;
   bool show_window = true;
   bool set_motion = true;  // 跳过靶车运动设置（用于静止靶车验证）
-  bool use_kalman = true;
+  bool use_kalman = false;
   std::string window_title = "AutoAim Test";
   double bullet_speed = 25.0;  // 比赛版弹丸初速 25 m/s
   double fire_delay = 0.0;     // 开火延迟（命令到实际发射），秒，可调
@@ -128,6 +128,7 @@ void printUsage(const char* argv0) {
       << "  --only N            run only condition N (0..5), default all\n"
       << "  --no-fire           aim only, do not fire\n"
       << "  --no-motion         do not set target motion (stationary target)\n"
+      << "  --kalman            enable Kalman tracking (off by default)\n"
       << "  --no-kalman         use raw PnP positions instead of Kalman tracking\n"
       << "  --no-window         disable the OpenCV visualization window\n"
       << "  --window NAME       visualization window title (default AutoAim Test)\n"
@@ -240,6 +241,8 @@ Options parseArgs(int argc, char** argv) {
       o.fire = false;
     } else if (arg == "--no-motion") {
       o.set_motion = false;
+    } else if (arg == "--kalman") {
+      o.use_kalman = true;
     } else if (arg == "--no-kalman") {
       o.use_kalman = false;
     } else if (arg == "--no-window") {
@@ -699,11 +702,16 @@ int main(int argc, char** argv) {
         continue;
       }
 
-      // 云台命令低通：避免检测框抖动导致 aim 跳变、云台乱动。
-      const double alpha = 0.35;  // 新命令权重（越小越平滑）
+      // Command slew-rate limit bounds a single-frame detection jump.
+      constexpr double kMaxCommandStepDeg = 1.5;
       if (have_best) {
-        smooth_aim = cv::Vec2d(smooth_aim[0] * (1.0 - alpha) + aim[0] * alpha,
-                               smooth_aim[1] * (1.0 - alpha) + aim[1] * alpha);
+        const auto limit_step = [&](double current, double requested) {
+          return current + std::clamp(requested - current,
+                                      -kMaxCommandStepDeg,
+                                      kMaxCommandStepDeg);
+        };
+        smooth_aim = cv::Vec2d(limit_step(yaw, aim[0]),
+                               limit_step(pitch, aim[1]));
         const double yaw_error = std::abs(smooth_aim[0] - yaw);
         const double pitch_error = std::abs(smooth_aim[1] - pitch);
         const bool gimbal_stable =
