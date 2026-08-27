@@ -502,6 +502,8 @@ int main(int argc, char** argv) {
     const auto t0 = std::chrono::steady_clock::now();
     double fire_cooldown_s = 0.06;  // ~16 发/s（模拟器射击冷却）
     auto last_fire = t0;
+    bool fire_limit_reached = false;
+    auto fire_limit_time = t0;
     int stable_frames = 0;
     constexpr int kStableFramesRequired = 3;
     constexpr double kYawFireErrorThresholdDeg = 3.5;
@@ -546,7 +548,19 @@ int main(int argc, char** argv) {
 
       const double elapsed = std::chrono::duration<double>(
           std::chrono::steady_clock::now() - t0).count();
-      if (elapsed > 30.0 || st.rounds_fired >= o.rounds) {
+      if (elapsed > 30.0) {
+        window_open = false;
+        st.elapsed_s = elapsed;
+        break;
+      }
+      if (st.rounds_fired >= o.rounds && !fire_limit_reached) {
+        fire_limit_reached = true;
+        fire_limit_time = std::chrono::steady_clock::now();
+      }
+      if (fire_limit_reached &&
+          std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                        fire_limit_time)
+                  .count() >= 1.0) {
         window_open = false;
         st.elapsed_s = elapsed;
         break;
@@ -770,7 +784,7 @@ int main(int argc, char** argv) {
 
       const auto now = std::chrono::steady_clock::now();
       const double since = std::chrono::duration<double>(now - last_fire).count();
-      if (!o.fire) {
+      if (!o.fire || fire_limit_reached) {
         (void)sim.sendAim(cmd);
       } else if (fire_ready && since >= fire_cooldown_s) {
         (void)sim.sendAim(cmd);
