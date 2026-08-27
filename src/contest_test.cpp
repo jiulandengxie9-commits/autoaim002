@@ -739,6 +739,14 @@ int main(int argc, char** argv) {
             std::abs(cf.gimbal.pitch_velocity_deg_s) <=
                 kGimbalVelocityThresholdDegS;
         stable_frames = gimbal_stable ? stable_frames + 1 : 0;
+        if (st.total_frames % 60 == 0) {
+          std::cout << "  fire-gate: stable_frames=" << stable_frames
+                    << " yaw_err=" << yaw_error
+                    << " pitch_err=" << pitch_error
+                    << " yaw_vel=" << cf.gimbal.yaw_velocity_deg_s
+                    << " pitch_vel=" << cf.gimbal.pitch_velocity_deg_s
+                    << " lock_streak=" << lock_streak << "\n";
+        }
       } else {
         smooth_aim = aim;  // 无目标直接用（保持最后角度）
         stable_frames = 0;
