@@ -570,17 +570,16 @@ int main(int argc, char** argv) {
             planning::planAimPoint(track_pos, track_vel, track_acc,
                                    o.bullet_speed, o.fire_delay);
         if (sol.valid && wp.valid) {
-          // 世界系瞄准点 -> 云台系。目标在云台系的方向角即命令角：
-          // yaw = atan2(x, z)，pitch = 90 + atan2(y, hypot(x,z))（SDK 约定）。
-          // 云台系已随云台转动，故无需叠加当前云台角（避免双积分振荡）。
+          // Convert the predicted absolute-world point into the current
+          // exposure's gimbal frame, then add the synchronized absolute angle.
           const cv::Vec3d p_g = vision::worldToGimbal(sol.aim_point, wp);
-          aim[0] = std::atan2(p_g[0], p_g[2]) * 180.0 / CV_PI;
-          aim[1] = 90.0 +
-                   std::atan2(p_g[1], std::hypot(p_g[0], p_g[2])) * 180.0 / CV_PI;
+          aim = vision::absoluteAimAngles(p_g, yaw, pitch, camera_tilt_deg);
           aim_dist = sol.distance_m;
         } else {
-          aim = vision::aimWithGravity(best.t_cam, yaw, pitch, camera_tilt_deg,
-                                       o.bullet_speed);
+          // PnP already gives the target in the gimbal frame, so use the
+          // same absolute-angle conversion as the planned-target path.
+          aim = vision::absoluteAimAngles(best.t_gimbal, yaw, pitch,
+                                          camera_tilt_deg);
           aim_dist = best.distance_m;
         }
       }

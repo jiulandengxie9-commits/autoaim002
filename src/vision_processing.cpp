@@ -368,34 +368,28 @@ cv::Vec3d pixelToWorld(const cv::Point2f& uv, double depth,
   return cameraToGimbal(pixelToCamera(uv, depth, intrinsics), extrinsics);
 }
 
-cv::Vec2d worldToAimAngles(const cv::Vec3d& p_cam) {
-  const double yaw = std::atan2(p_cam[0], p_cam[2]);
-  const double pitch =
-      std::atan2(p_cam[1], std::hypot(p_cam[0], p_cam[2]));
-  return cv::Vec2d(yaw * 180.0 / CV_PI, 90.0 + pitch * 180.0 / CV_PI);
+cv::Vec2d gimbalRelativeAimAngles(const cv::Vec3d& p_gimbal) {
+  const double horizontal = std::hypot(p_gimbal[0], p_gimbal[2]);
+  if (horizontal <= 1e-9 && std::abs(p_gimbal[1]) <= 1e-9) {
+    return cv::Vec2d(0.0, 0.0);
+  }
+
+  const double yaw = std::atan2(p_gimbal[0], p_gimbal[2]);
+  const double pitch = std::atan2(p_gimbal[1], horizontal);
+  return cv::Vec2d(yaw * 180.0 / CV_PI, pitch * 180.0 / CV_PI);
 }
 
-cv::Vec2d absoluteAimAngles(const cv::Vec3d& p_cam, double gimbal_yaw_deg,
+cv::Vec2d worldToAimAngles(const cv::Vec3d& p_cam) {
+  const cv::Vec2d relative = gimbalRelativeAimAngles(p_cam);
+  return cv::Vec2d(relative[0], 90.0 + relative[1]);
+}
+
+cv::Vec2d absoluteAimAngles(const cv::Vec3d& p_gimbal, double gimbal_yaw_deg,
                             double gimbal_pitch_deg, double camera_tilt_deg) {
-  const double x = p_cam[0];
-  const double y = p_cam[1];
-  const double z = p_cam[2];
-  const double h = std::hypot(x, z);
-
-  // On-screen offset of the target in the camera optical frame (+x right,
-  // +y down, +z forward). The horizontal (yaw) offset is measured
-  // perpendicular to the camera tilt axis and is scaled by cos(tilt); the
-  // vertical (pitch) offset lies along the tilt axis and is not scaled.
-  // A target to the RIGHT (+x) must turn the gimbal to larger yaw, so the
-  // yaw offset is ADDED (no leading minus). A target BELOW (+y) needs the
-  // gimbal to pitch down (pitch_deg decreases from 90 at level), so the
-  // pitch offset is SUBTRACTED.
-  const double yaw_offset =
-      std::cos(camera_tilt_deg * CV_PI / 180.0) * std::atan2(x, z) * 180.0 / CV_PI;
-  const double pitch_offset = -std::atan2(y, h) * 180.0 / CV_PI;
-
-  return cv::Vec2d(gimbal_yaw_deg + yaw_offset,
-                   gimbal_pitch_deg + pitch_offset);
+  (void)camera_tilt_deg;
+  const cv::Vec2d relative = gimbalRelativeAimAngles(p_gimbal);
+  return cv::Vec2d(gimbal_yaw_deg + relative[0],
+                   gimbal_pitch_deg + relative[1]);
 }
 
 cv::Vec2d aimWithGravity(const cv::Vec3d& p_cam, double gimbal_yaw_deg,

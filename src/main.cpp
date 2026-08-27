@@ -47,6 +47,7 @@ struct Options {
   double armor_width = 0.135;
   double armor_height = 0.056;
   bool use_kalman = true;
+  bool send_commands = false;
   double kf_pos_sigma = 0.01;
   double kf_vel_sigma = 0.1;
   double kf_acc_sigma = 0.2;
@@ -174,6 +175,8 @@ void printUsage(const char* argv0) {
        << "  --kalman           enable Kalman smoothing of the PnP position\n"
        << "                    (default)\n"
        << "  --no-kalman        disable Kalman smoothing\n"
+      << "  --control          send calculated absolute yaw/pitch to the simulator\n"
+      << "                    (default: display and log only)\n"
        << "  --kf-pos-sigma N   process noise std-dev for position (m, default 0.01)\n"
        << "  --kf-vel-sigma N   process noise std-dev for velocity (m/s, default 0.1)\n"
        << "  --kf-acc-sigma N   process noise std-dev for accel (m/s^2, default 0.2)\n"
@@ -287,6 +290,8 @@ Options parseArgs(int argc, char** argv) {
       o.use_kalman = true;
     } else if (arg == "--no-kalman") {
       o.use_kalman = false;
+    } else if (arg == "--control") {
+      o.send_commands = true;
     } else if (arg == "--kf-pos-sigma") {
       o.kf_pos_sigma = std::strtod(next("--kf-pos-sigma").c_str(), nullptr);
     } else if (arg == "--kf-vel-sigma") {
@@ -852,17 +857,50 @@ int main(int argc, char** argv) {
                     << " vel=(" << v[0] << ", " << v[1] << ", " << v[2]
                     << ") m/s"
                     << " lost=" << tracker.lost_frames;
-          // 瞄准角用滤波后的世界坐标：world -> gimbal -> camera。
+          // 瞄准角用滤波后的世界坐标：world -> gimbal -> absolute command。
           if (world_pose.valid) {
-            const cv::Vec3d f_cam =
-                vision::gimbalToCamera(vision::worldToGimbal(f, world_pose),
-                                       camera_extrinsics);
+            const cv::Vec3d f_gimbal = vision::worldToGimbal(f, world_pose);
             const cv::Vec2d abs_aim = vision::absoluteAimAngles(
-                f_cam, g.yaw_deg, g.pitch_deg, camera_tilt_deg);
+                f_gimbal, g.yaw_deg, g.pitch_deg, camera_tilt_deg);
             std::cout << " aim_yaw=" << std::fixed << std::setprecision(2)
                       << abs_aim[0] << " aim_pitch=" << abs_aim[1];
           }
           std::cout << "\n";
+        }
+      }
+
+      // Keep one target-angle value for the HUD and optional control output.
+      // Tracking is done in absolute world coordinates, so convert the
+      // filtered point back into this exposure's gimbal frame before aiming.
+      cv::Vec2d target_aim(0.0, 90.0);
+      double target_dist = 0.0;
+      bool hud_target = false;
+      if (kalman_active && world_pose.valid) {
+        const cv::Vec3d target_gimbal =
+            vision::worldToGimbal(tracker.filtered, world_pose);
+        target_aim = vision::absoluteAimAngles(
+            target_gimbal, g.yaw_deg, g.pitch_deg, camera_tilt_deg);
+        target_dist = cv::norm(target_gimbal);
+        hud_target = true;
+      } else if (camera_intrinsics.fx > 0.0) {
+        for (const auto& p : poses) {
+          if (!p.valid) continue;
+          target_aim = vision::absoluteAimAngles(
+              p.t_gimbal, g.yaw_deg, g.pitch_deg, camera_tilt_deg);
+          target_dist = cv::norm(p.t_gimbal);
+          hud_target = true;
+          break;
+        }
+      }
+
+      if (o.send_commands && hud_target) {
+        UdpGimbalCommand command;
+        command.yaw_deg = static_cast<float>(target_aim[0]);
+        command.pitch_deg = static_cast<float>(target_aim[1]);
+        command.distance_m = static_cast<float>(target_dist);
+        const auto sent = sim.sendAim(command);
+        if (!sent.ok()) {
+          std::cout << "sendAim: " << sent.status.message << "\n";
         }
       }
 
@@ -911,27 +949,6 @@ int main(int argc, char** argv) {
           }
           // Aiming HUD: current gimbal angles + target aim (from the Kalman
           // filtered world position when active, otherwise the closest raw pose).
-          cv::Vec2d target_aim(0.0, 90.0);
-          double target_dist = 0.0;
-          bool hud_target = false;
-          if (kalman_active && world_pose.valid) {
-            const cv::Vec3d f_cam =
-                vision::gimbalToCamera(
-                    vision::worldToGimbal(tracker.filtered, world_pose),
-                    camera_extrinsics);
-            target_aim = vision::absoluteAimAngles(f_cam, g.yaw_deg, g.pitch_deg,
-                                                   camera_tilt_deg);
-            target_dist = cv::norm(tracker.filtered);
-            hud_target = true;
-          } else if (camera_intrinsics.fx > 0.0 && !poses.empty()) {
-            for (const auto& p : poses) {
-              if (!p.valid) continue;
-              target_aim = vision::absoluteAimAngles(p.t_cam, g.yaw_deg, g.pitch_deg, camera_tilt_deg);
-              target_dist = p.distance_m;
-              hud_target = true;
-              break;
-            }
-          }
           vision::drawAimHud(display, g.yaw_deg, g.pitch_deg, hud_target,
                              target_aim, target_dist);
 
@@ -986,31 +1003,8 @@ int main(int argc, char** argv) {
                         cv::LINE_AA);
           }
         }
-        {
-          cv::Vec2d target_aim(0.0, 90.0);
-          double target_dist = 0.0;
-          bool hud_target = false;
-          if (kalman_active && world_pose.valid) {
-            const cv::Vec3d f_cam =
-                vision::gimbalToCamera(
-                    vision::worldToGimbal(tracker.filtered, world_pose),
-                    camera_extrinsics);
-            target_aim = vision::absoluteAimAngles(f_cam, g.yaw_deg, g.pitch_deg,
-                                                   camera_tilt_deg);
-            target_dist = cv::norm(tracker.filtered);
-            hud_target = true;
-          } else if (camera_intrinsics.fx > 0.0 && !poses.empty()) {
-            for (const auto& p : poses) {
-              if (!p.valid) continue;
-              target_aim = vision::absoluteAimAngles(p.t_cam, g.yaw_deg, g.pitch_deg, camera_tilt_deg);
-              target_dist = p.distance_m;
-              hud_target = true;
-              break;
-            }
-          }
-          vision::drawAimHud(saved, g.yaw_deg, g.pitch_deg, hud_target,
-                             target_aim, target_dist);
-        }
+        vision::drawAimHud(saved, g.yaw_deg, g.pitch_deg, hud_target,
+                           target_aim, target_dist);
         cv::imwrite(o.save_dir + "/result.png", saved);
       }
 

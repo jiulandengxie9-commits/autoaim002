@@ -175,21 +175,21 @@ cv::Vec3d pixelToWorld(const cv::Point2f& uv, double depth,
                        const CameraIntrinsics& intrinsics,
                        const CameraExtrinsics& extrinsics);
 
+// Yaw/pitch angles (degrees) relative to the current gimbal orientation for a
+// target expressed in the gimbal frame. The gimbal frame uses +x right, +y up,
+// +z forward. Pitch is 90 degrees at level and increases when aiming up.
+cv::Vec2d gimbalRelativeAimAngles(const cv::Vec3d& p_gimbal);
+
 // Yaw/pitch angles (degrees) to aim the gimbal at a camera-frame point.
-// Convention (matching the SDK): yaw = atan2(x, z); pitch = 90 at level and
-// increases when the target is above the optical axis (aiming up).
+// This legacy helper assumes the camera optical frame is already aligned with
+// the gimbal axes and should not be used when the fixed camera extrinsic is
+// non-identity. Prefer gimbalRelativeAimAngles() after cameraToGimbal().
 cv::Vec2d worldToAimAngles(const cv::Vec3d& p_cam);
 
 // Absolute gimbal yaw/pitch (degrees) the gimbal must be at to aim at a
-// camera-frame target point. The target's on-screen offset in the camera
-// optical frame (+x right, +y down) is added to the current gimbal angle.
-// The horizontal (yaw) offset is measured perpendicular to the camera tilt
-// axis, so it is scaled by cos(camera_tilt_deg) before subtraction; the
-// vertical (pitch) offset lies along the tilt axis and is subtracted directly.
-// The result stays (approximately) constant while the target is stationary in
-// the world even as the gimbal rotates. Convention: yaw=atan2(x,z); pitch=90
-// at level.
-cv::Vec2d absoluteAimAngles(const cv::Vec3d& p_cam, double gimbal_yaw_deg,
+// gimbal-frame target point. The relative angles are added to the actual
+// exposure-synchronized gimbal angles, so the result is an absolute command.
+cv::Vec2d absoluteAimAngles(const cv::Vec3d& p_gimbal, double gimbal_yaw_deg,
                             double gimbal_pitch_deg, double camera_tilt_deg);
 
 // Gravity-compensated absolute aim angles. Projectile follows ballistic
