@@ -1,8 +1,9 @@
 # 代码讲解（CODE WALKTHROUGH）
 
-程序由两部分组成：`src/main.cpp`（主程序：SDK 读帧 + 显示/打印 + 调用视觉模块）与
-`src/vision_processing.{hpp,cpp}`（纯视觉处理模块：形态学滤波、灯条/装甲板识别、
-PnP 位姿估计与卡尔曼滤波，不依赖 SDK）。
+程序按功能拆分为几个包（详见 `ARCHITECTURE.md`）：`src/main.cpp`（主程序：SDK 读帧 +
+显示/打印 + 调用功能包）与 `tasks/vision/vision_processing.{hpp,cpp}`（纯视觉功能包：
+形态学滤波、灯条/装甲板识别、PnP 位姿估计与卡尔曼滤波，不依赖 SDK），另有
+`tasks/detection/`（检测器抽象）与 `tasks/planning/`（弹道/提前量）。
 下面按功能拆解它做了什么、为什么这么做。
 
 ## 0. 整体流程
@@ -130,11 +131,11 @@ sim.close();
 
 ## 9. 纯视觉处理模块（vision_processing）
 
-`src/vision_processing.hpp/.cpp` 只依赖 OpenCV，不含 SDK，便于独立测试与复用。
-`main.cpp` 通过 `#include "vision_processing.hpp"` 调用：
+`tasks/vision/vision_processing.hpp/.cpp` 只依赖 OpenCV，不含 SDK，便于独立测试与复用。
+`main.cpp` 通过 `#include "tasks/vision/vision_processing.hpp"` 调用：
 
 ```cpp
-// 1) 通道差阈值分割目标色灯条（red: R-B；blue: B-R）
+// 1) 通道差阈值分割目标色灯条（red: B-R；blue: R-B）
 cv::Mat mask = vision::splitColorMask(bgr, LightColor::Red, rb_threshold);
 // 兼容旧接口：splitRedMask(bgr, thr) == splitColorMask(bgr, Red, thr)
 
@@ -224,7 +225,7 @@ max_blob_ratio` 控制。
 
 ## 10. PnP 三维位姿估计（`solveArmorPose`）
 
-`src/vision_processing.{hpp,cpp}` 新增的纯 OpenCV 世界坐标模块：
+`tasks/vision/vision_processing.{hpp,cpp}` 新增的纯 OpenCV 世界坐标模块：
 
 - `CameraIntrinsics`：`fx/fy/cx/cy` + 畸变系数（`camera-calibration.json` 内参）。
 - `CameraExtrinsics`：云台→相机光学系的静态外参（平移 + 四元数 xyzw）。
@@ -251,7 +252,7 @@ max_blob_ratio` 控制。
 
 ## 11. 卡尔曼滤波（`KalmanFilter3D`）
 
-`src/vision_processing.{hpp,cpp}` 的 `KalmanFilter3D` 参考 `big_homework.cpp` 的分轴
+`tasks/vision/vision_processing.{hpp,cpp}` 的 `KalmanFilter3D` 参考 `big_homework.cpp` 的分轴
 卡尔曼（`A` 取位置/速度/加速度，`H = [1 0 0]`）与 `rmcs_auto_aim_v2` 的
 predict/update 流程，合并为单个 9 维线性卡尔曼：
 

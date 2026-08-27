@@ -260,7 +260,7 @@ class KalmanFilter3D {
 
 cv::Mat splitRedMask(const cv::Mat& bgr, int rb_threshold);
 
-// Split the mask of a colored light bar: red uses (R-B), blue uses (B-R).
+// Split the mask of a colored light bar: red uses (B-R), blue uses (R-B).
 cv::Mat splitColorMask(const cv::Mat& bgr, LightColor color,
                        int rb_threshold);
 

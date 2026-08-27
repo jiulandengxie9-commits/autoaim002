@@ -2,8 +2,8 @@
 #include <daedalus_sim_sdk/runtime_capabilities.hpp>
 #include <daedalus_sim_sdk/talos_metadata_reader.hpp>
 
-#include "detector.hpp"
-#include "vision_processing.hpp"
+#include "tasks/detection/detector.hpp"
+#include "tasks/vision/vision_processing.hpp"
 
 #include <opencv2/calib3d.hpp>
 #include <opencv2/core.hpp>
@@ -128,7 +128,7 @@ void printUsage(const char* argv0) {
       << "print per-frame information to the terminal.\n"
       << "When --morph is active (default) every frame is also processed by the\n"
       << "morphological filter pipeline (erode, dilate, open, close) defined in\n"
-      << "src/vision_processing.cpp and the intermediate stages are shown.\n\n"
+       << "tasks/vision/vision_processing.cpp and the intermediate stages are shown.\n\n"
       << "Options:\n"
       << "  --ipc-dir PATH    IPC directory used by the simulator.\n"
       << "                    (default: $XDG_RUNTIME_DIR or /tmp,\n"
@@ -143,7 +143,7 @@ void printUsage(const char* argv0) {
       << "  --morph           enable morphological filtering (default)\n"
       << "  --no-morph        disable morphological filtering\n"
       << "  --kernel N        structuring element size for morphology (default 5)\n"
-      << "  --rb-threshold N  R-B/B-R threshold for the mask (default 30)\n"
+      << "  --rb-threshold N  B-R/R-B (red/blue) threshold for the mask (default 30)\n"
       << "  --color NAME      light bar color: red | blue (default red)\n"
       << "  --detector NAME   detector backend: traditional | nn (default nn,\n"
       << "                    the YOLO neural network via OpenVINO)\n"

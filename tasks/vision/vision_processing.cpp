@@ -21,9 +21,9 @@ cv::Mat splitColorMask(const cv::Mat& bgr, LightColor color,
 
   cv::Mat channel_diff;
   if (color == LightColor::Blue) {
-    cv::subtract(bgr_channels[2], bgr_channels[0], channel_diff);  // B - R
+    cv::subtract(bgr_channels[2], bgr_channels[0], channel_diff);  // R - B
   } else {
-    cv::subtract(bgr_channels[0], bgr_channels[2], channel_diff);  // R - B
+    cv::subtract(bgr_channels[0], bgr_channels[2], channel_diff);  // B - R
   }
 
   cv::Mat mask;
@@ -259,7 +259,7 @@ cv::Mat makeGrid(const cv::Mat& bgr, const MorphologyResult& m,
                  const DetectionResult& det, int cell_width) {
   const cv::Mat cells[2][4] = {
       {makeCell(bgr, "Original", cell_width),
-       makeCell(m.mask, "Threshold (R-B)", cell_width),
+       makeCell(m.mask, "Threshold (B-R)", cell_width),
        makeCell(m.eroded, "Erode", cell_width),
        makeCell(m.dilated, "Dilate", cell_width)},
       {makeCell(m.opened, "Open (erode+dilate)", cell_width),

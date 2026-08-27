@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-#include "vision_processing.hpp"
+#include "tasks/vision/vision_processing.hpp"
 
 namespace detect {
 

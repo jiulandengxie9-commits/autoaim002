@@ -24,9 +24,9 @@
 #include <daedalus_sim_sdk/scene_control_client.hpp>
 #include <daedalus_sim_sdk/talos_metadata_reader.hpp>
 
-#include "detector.hpp"
-#include "planning.hpp"
-#include "vision_processing.hpp"
+#include "tasks/detection/detector.hpp"
+#include "tasks/planning/planning.hpp"
+#include "tasks/vision/vision_processing.hpp"
 
 #include <opencv2/calib3d.hpp>
 #include <opencv2/core.hpp>

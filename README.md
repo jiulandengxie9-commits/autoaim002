@@ -2,8 +2,8 @@
 
 通过 Daedalus 竞赛版模拟器（`linux-x86_64` 发行版）的 C++17 SDK 读取相机图像与模拟器
 状态信息，使用 OpenCV 显示图像，并把读取到的信息实时打印到终端。图像会送入独立的
-**纯视觉处理模块**（`src/vision_processing.*`）做形态学滤波（腐蚀、膨胀、开运算、
-闭运算）、灯条/装甲板识别（外接矩形框），并利用 `camera-calibration.json` 的相机
+**纯视觉处理功能包**（`tasks/vision/vision_processing.*`）做形态学滤波（腐蚀、膨胀、
+开运算、闭运算）、灯条/装甲板识别（外接矩形框），并利用 `camera-calibration.json` 的相机
 内参/外参结合 **PnP** 求出装甲板与灯条的**云台系（世界系）三维坐标**，可视化各阶段
 结果。配套 `autoaim002_test` 按校内赛规则 6 工况自动驱动靶车并自瞄开火。
 
@@ -29,7 +29,7 @@
     `yaw/pitch`、目标瞄准角与距离、中心十字线、水平参考线，以及目标相对
     云台的角度偏差指示（`worldToAimAngles()`）。
 - 形态学滤波（默认开启，`--no-morph` 关闭）：
-  - `splitRedMask`：`R-B` 通道差阈值分割出红色灯条掩膜。
+  - `splitRedMask`：`B-R` 通道差阈值分割出红色灯条掩膜。
   - `applyMorphology`：腐蚀 → 膨胀 → 开运算 → 闭运算 → 开+闭级联，输出最终掩膜。
   - `findContours` 提取轮廓，`--max-area` 可滤除面积超限的干扰区域。
 - 灯条与装甲板识别（在滤波后的轮廓上执行）：
@@ -62,28 +62,49 @@
 
 ## 目录结构
 
+代码按**功能包（package）**组织，参考 `tongji` 工程：`tasks/` 下每个子目录是一个
+可复用的静态库功能包，`src/` 只放可执行程序入口，`tests/` 放离线单元测试。
+
 ```
 autoaim002/
-├── CMakeLists.txt              # CMake 构建脚本，链接 SDK 与 OpenCV
+├── CMakeLists.txt              # CMake 构建脚本（添加功能包 + 生成可执行程序/测试）
 ├── README.md                   # 本文档
 ├── QUICKSTART.md               # 快速开始
 ├── docs/
+│   ├── ARCHITECTURE.md         # 架构文档：功能包结构与扩展指南
 │   └── CODE_WALKTHROUGH.md     # 代码逐段讲解
-└── src/
-    ├── main.cpp                # 主程序：SDK 读帧 + 调用视觉模块 + 显示/打印
-    ├── contest_test.cpp        # 校内赛自瞄测试工具（6 工况自动驱动靶车 + 自瞄开火）
-    ├── detector.hpp/.cpp       # 检测器抽象：传统视觉 / 神经网络（--detector 切换）
-    ├── planning.hpp/.cpp       # 规划器：弹道解算 + 提前量预测
-    ├── vision_processing.hpp   # 纯视觉处理模块声明（形态学 + 灯条/装甲板识别 + PnP + 卡尔曼）
-    └── vision_processing.cpp   # 纯视觉处理模块实现
+├── configs/
+│   └── camera-calibration.json # 相机标定（内参 + 云台→相机外参），PnP 用
+├── src/                        # 可执行程序入口（main）
+│   ├── main.cpp                # 主程序：SDK 读帧 + 调用功能包 + 显示/打印
+│   ├── contest_test.cpp        # 校内赛自瞄测试工具（6 工况自动驱动靶车 + 自瞄开火）
+│   └── pnp_curve_test.cpp      # 识别 + PnP 曲线测试（输出 CSV）
+├── tasks/                      # ★ 功能包（静态库）
+│   ├── vision/                 # 纯视觉：形态学 + 灯条/装甲板识别 + PnP + 坐标链 + 卡尔曼 + HUD
+│   │   ├── CMakeLists.txt
+│   │   ├── vision_processing.hpp
+│   │   └── vision_processing.cpp
+│   ├── detection/              # 检测器抽象：传统视觉 / 神经网络（--detector 切换）
+│   │   ├── CMakeLists.txt
+│   │   ├── detector.hpp
+│   │   └── detector.cpp
+│   └── planning/               # 规划器：弹道解算 + 提前量预测
+│       ├── CMakeLists.txt
+│       ├── planning.hpp
+│       └── planning.cpp
+├── tests/                      # 离线单元测试（无需模拟器）
+│   ├── planning_test.cpp
+│   └── vision_test.cpp
 └── tools/
     ├── ov_armor_service.py     # OpenVINO 神经网络检测子进程服务
     ├── plot_pnp.py             # 单次 PnP 曲线画图（camera/gimbal/world/距离/框/数量）
     └── plot_pnp_compare.py     # 多份 CSV 对比画图（raw vs Kalman、距离、抖动）
 ```
 
-`src/vision_processing.*` 是**纯图像处理**模块：只接收 `cv::Mat` 与标定参数，
-不含任何模拟器/SDK 依赖，可独立测试或复用到其他工程。
+`tasks/vision/vision_processing.*` 是**纯图像处理功能包**：只接收 `cv::Mat` 与标定参数，
+不含任何模拟器/SDK 依赖，可独立测试或复用到其他工程。跨功能包引用头文件时使用项目根
+相对路径（如 `#include "tasks/vision/vision_processing.hpp"`），详见
+`docs/ARCHITECTURE.md`。
 
 ## 依赖
 
@@ -101,8 +122,9 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
 ```
 
-生成的程序位于 `build/autoaim002`。如果 SDK 不在默认路径，请通过 `-DDAEDALUS_SDK_ROOT=`
-指定，例如：
+生成的程序位于 `build/`：`autoaim002`（主程序）、`autoaim002_test`（自瞄测试）、
+`pnp_curve_test`（PnP 曲线），以及两个离线单元测试 `vision_test`、`planning_test`。
+如果 SDK 不在默认路径，请通过 `-DDAEDALUS_SDK_ROOT=` 指定，例如：
 
 ```bash
 cmake -S . -B build -DDAEDALUS_SDK_ROOT=/path/to/linux-x86_64/sdk
@@ -144,7 +166,7 @@ cmake -S . -B build -DDAEDALUS_SDK_ROOT=/path/to/linux-x86_64/sdk
 | `--morph` / `--no-morph` | 开启 / 关闭形态学滤波 | 开启 |
 | `--kernel N` | 形态学结构元素尺寸（正奇数） | `5` |
 | `--rb-threshold N` | 掩膜的颜色通道差阈值 | `30` |
-| `--color NAME` | 灯条颜色：`red`（R-B）或 `blue`（B-R） | `red` |
+| `--color NAME` | 灯条颜色：`red`（B-R）或 `blue`（R-B） | `red` |
 | `--detector NAME` | 检测后端：`nn`（默认，OpenVINO）或 `traditional`（形态学） | `nn` |
 | `--nn-model PATH` | `--detector nn` 的 OpenVINO/ONNX 模型路径 | tongji `yolo11.xml` |
 | `--max-area N` | 滤除面积大于 N 像素的轮廓，0 表示保留全部 | `0` |
@@ -189,7 +211,7 @@ cmake -S . -B build -DDAEDALUS_SDK_ROOT=/path/to/linux-x86_64/sdk
 | `nn`（默认） | `NNDetector`：OpenVINO（Python 子进程服务 `tools/ov_armor_service.py`）加载 YOLO，letterbox 640×640 | 参考 `tongji/tasks/auto_aim` 的 yolo11.xml（38 类四点模型）；输出 xywh+类+4 关键点 |
 | `traditional` | `VisionDetector`：`splitColorMask` → `applyMorphology` → `detect` | 形态学滤波 + 灯条/装甲板配对，纯 OpenCV |
 
-`src/detector.{hpp,cpp}` 定义 `detect::IDetector` 抽象接口与工厂
+`tasks/detection/detector.{hpp,cpp}` 定义 `detect::IDetector` 抽象接口与工厂
 `makeDetector()`。神经网络后端通过 C++ 启动一个常驻 Python 子进程（OpenVINO
 推理），C++ 每帧发送 BGR 原始帧、回收 JSON 检测结果；子进程无法启动时自动回退
 `traditional` 并打印原因。
@@ -206,10 +228,10 @@ cmake -S . -B build -DDAEDALUS_SDK_ROOT=/path/to/linux-x86_64/sdk
 ## 形态学滤波说明
 
 本程序的视觉处理部分参考了 `~/桌面/big_homework/big_homework.cpp` 的灯条检测思路，
-并拆分为独立的纯视觉模块 `src/vision_processing.*`，由 `main.cpp` 调用。处理流程：
+并拆分为独立的纯视觉功能包 `tasks/vision/vision_processing.*`，由 `main.cpp` 调用。处理流程：
 
-1. **阈值分割**（`splitRedMask`）：BGR 三通道分离后计算 `R - B`，`threshold` 得到二值
-   红色掩膜——红色灯条（R 高、B 低）亮起，其余为背景。
+1. **阈值分割**（`splitRedMask`）：BGR 三通道分离后计算 `B - R`，`threshold` 得到二值
+   红色掩膜——红色灯条（B 高、R 低）亮起，其余为背景。
 2. **腐蚀**（`erode`）：收缩前景，去掉细小的孤立噪点。
 3. **膨胀**（`dilate`）：扩大前景，补上灯条内部的空洞与断缝。
 4. **开运算**（`MORPH_OPEN` = 先腐蚀后膨胀）：整体去小噪点、断开粘连。
@@ -259,7 +281,7 @@ cmake -S . -B build -DDAEDALUS_SDK_ROOT=/path/to/linux-x86_64/sdk
 ## PnP 三维位姿估计（世界坐标）
 
 识别到装甲板后，程序对每个装甲板求解其在**云台系（世界系）**中的三维坐标。实现位于
-`src/vision_processing.{hpp,cpp}` 的 `solveArmorPose()`，纯 OpenCV，不依赖 SDK：
+`tasks/vision/vision_processing.{hpp,cpp}` 的 `solveArmorPose()`，纯 OpenCV，不依赖 SDK：
 
 1. **加载标定**：启动时解析发行版自带的 `camera-calibration.json`
    （可用 `--calibration` 覆盖），得到：
@@ -293,7 +315,7 @@ OpenCV 光学系（+Z 朝前、+X 朝右、+Y 朝下），云台系为世界系�
 
 `big_homework.cpp` 用三个独立的一维卡尔曼分别滤波旋转中心的 x/y/z；`rmcs_auto_aim_v2`
 用 `EKF` 维护整个机器人状态。本程序把两者结合为**单个 9 维线性卡尔曼**
-（`src/vision_processing.{hpp,cpp}` 的 `KalmanFilter3D`），状态为
+（`tasks/vision/vision_processing.{hpp,cpp}` 的 `KalmanFilter3D`），状态为
 `[x, y, z, vx, vy, vz, ax, ay, az]`，直接对 PnP 求出的云台系（世界系）坐标做
 平滑，供后续瞄准/预测使用：
 
