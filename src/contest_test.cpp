@@ -504,7 +504,8 @@ int main(int argc, char** argv) {
     auto last_fire = t0;
     int stable_frames = 0;
     constexpr int kStableFramesRequired = 3;
-    constexpr double kAimErrorThresholdDeg = 1.5;
+    constexpr double kYawFireErrorThresholdDeg = 3.5;
+    constexpr double kPitchFireErrorThresholdDeg = 1.5;
     constexpr double kGimbalVelocityThresholdDegS = 6.0;
     constexpr int kLostHoldFrames = 5;
     constexpr double kAssociationGateM = 1.2;
@@ -732,8 +733,8 @@ int main(int argc, char** argv) {
         const double yaw_error = std::abs(smooth_aim[0] - yaw);
         const double pitch_error = std::abs(smooth_aim[1] - pitch);
         const bool gimbal_stable =
-            yaw_error <= kAimErrorThresholdDeg &&
-            pitch_error <= kAimErrorThresholdDeg &&
+            yaw_error <= kYawFireErrorThresholdDeg &&
+            pitch_error <= kPitchFireErrorThresholdDeg &&
             std::abs(cf.gimbal.yaw_velocity_deg_s) <=
                 kGimbalVelocityThresholdDegS &&
             std::abs(cf.gimbal.pitch_velocity_deg_s) <=
