@@ -994,6 +994,8 @@ int main(int argc, char** argv) {
 
       if (show_window) {
         try {
+          // 可视化降负载：隔帧渲染 + 75% 缩放，去掉形态学大网格窗口。
+          if (frame_count % 2 == 0) {
           cv::Mat display = vision::drawResult(image, morph, det);
           if (camera_intrinsics.fx > 0.0) {
             for (std::size_t i = 0; i < det.armors.size(); ++i) {
@@ -1045,12 +1047,21 @@ int main(int argc, char** argv) {
                                     target_camera, target_gimbal, target_world,
                                     target_world_sdk);
 
-          cv::imshow(o.window_title, display);
-          cv::imshow("Morphology Stages",
-                     vision::makeGrid(image, morph, det, o.grid_width));
+          cv::Mat show_img;
+          if (display.cols > 600) {
+            cv::resize(display, show_img, cv::Size(), 0.75, 0.75,
+                       cv::INTER_NEAREST);
+          } else {
+            show_img = display;
+          }
+          cv::imshow(o.window_title, show_img);
+          }
           const int key = cv::waitKey(1);
           if (key == 'q' || key == 27) break;
-          if (cv::getWindowProperty(o.window_title, cv::WND_PROP_VISIBLE) < 1) break;
+          if (frame_count % 30 == 0 &&
+              cv::getWindowProperty(o.window_title, cv::WND_PROP_VISIBLE) < 1) {
+            break;
+          }
         } catch (const cv::Exception& e) {
           std::cout << "window display unavailable: " << e.what() << "\n";
           show_window = false;

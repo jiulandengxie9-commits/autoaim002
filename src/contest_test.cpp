@@ -663,38 +663,51 @@ int main(int argc, char** argv) {
       }
       if (show_window) {
         try {
-          cv::Mat display = vision::drawResult(image, morph, det);
-          if (have_best) {
-            // 在图像上标出目标装甲板中心（相机系坐标直接投影）。
-            const cv::Point2f p = vision::projectPoint(best.t_cam, intrinsics);
-            if (p.x > 0 && p.y > 0) {
-              cv::line(display, cv::Point(int(p.x) - 10, int(p.y)),
-                       cv::Point(int(p.x) + 10, int(p.y)),
-                       cv::Scalar(0, 255, 0), 2);
-              cv::line(display, cv::Point(int(p.x), int(p.y) - 10),
-                       cv::Point(int(p.x), int(p.y) + 10),
-                       cv::Scalar(0, 255, 0), 2);
+          // 可视化降负载：隔帧渲染窗口（检测/控制仍逐帧进行，GUI 不与主循环
+          // 抢 CPU），并缩放到 75% 显示。waitKey 每帧保留以处理按键/刷新。
+          if (st.total_frames % 2 == 0) {
+            cv::Mat display = vision::drawResult(image, morph, det);
+            if (have_best) {
+              // 在图像上标出目标装甲板中心（相机系坐标直接投影）。
+              const cv::Point2f p = vision::projectPoint(best.t_cam, intrinsics);
+              if (p.x > 0 && p.y > 0) {
+                cv::line(display, cv::Point(int(p.x) - 10, int(p.y)),
+                         cv::Point(int(p.x) + 10, int(p.y)),
+                         cv::Scalar(0, 255, 0), 2);
+                cv::line(display, cv::Point(int(p.x), int(p.y) - 10),
+                         cv::Point(int(p.x), int(p.y) + 10),
+                         cv::Scalar(0, 255, 0), 2);
+              }
             }
+            vision::drawAimHud(display, yaw, pitch, have_best, aim,
+                               have_best ? aim_dist : 0.0, have_aim_world,
+                               aim_world, true, have_best, aim, aim_dist);
+            char info[160];
+            std::snprintf(info, sizeof(info),
+                          "cond %d/6 %s  fired=%u/%u  locked=%llu",
+                          ci + 1, c.name, st.rounds_fired, o.rounds,
+                          (unsigned long long)st.locked_frames);
+            cv::putText(display, info, cv::Point(12, 104),
+                        cv::FONT_HERSHEY_SIMPLEX, 0.55,
+                        cv::Scalar(0, 200, 255), 1, cv::LINE_AA);
+            cv::Mat show_img;
+            if (display.cols > 600) {
+              cv::resize(display, show_img, cv::Size(), 0.75, 0.75,
+                         cv::INTER_NEAREST);
+            } else {
+              show_img = display;
+            }
+            cv::imshow(o.window_title, show_img);
           }
-          vision::drawAimHud(display, yaw, pitch, have_best, aim,
-                             have_best ? aim_dist : 0.0, have_aim_world,
-                             aim_world, true, have_best, aim, aim_dist);
-          char info[160];
-          std::snprintf(info, sizeof(info),
-                        "cond %d/6 %s  fired=%u/%u  locked=%llu",
-                        ci + 1, c.name, st.rounds_fired, o.rounds,
-                        (unsigned long long)st.locked_frames);
-          cv::putText(display, info, cv::Point(12, 104),
-                      cv::FONT_HERSHEY_SIMPLEX, 0.55,
-                      cv::Scalar(0, 200, 255), 1, cv::LINE_AA);
-          cv::imshow(o.window_title, display);
           const int key = cv::waitKey(1);
           if (key == 'q' || key == 27) {
             window_open = false;
             st.elapsed_s = elapsed;
             break;
           }
-          if (cv::getWindowProperty(o.window_title, cv::WND_PROP_VISIBLE) < 1) {
+          // getWindowProperty 部分后端会阻塞，避免每帧调用。
+          if (st.total_frames % 30 == 0 &&
+              cv::getWindowProperty(o.window_title, cv::WND_PROP_VISIBLE) < 1) {
             show_window = false;
           }
         } catch (const cv::Exception&) {
