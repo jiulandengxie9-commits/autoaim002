@@ -198,8 +198,9 @@ cv::Vec3d pixelToWorld(const cv::Point2f& uv, double depth,
 cv::Vec2d gimbalRelativeAimAngles(const cv::Vec3d& p_gimbal);
 
 // Yaw/pitch corrections (degrees) from a target in the camera optical frame.
-// OpenCV's camera frame is +X right, +Y down and +Z forward. These are image
-// alignment errors, so a positive image Y requires a negative pitch command.
+// OpenCV's camera frame is +X right, +Y down and +Z forward. Daedalus yaw has
+// the opposite sign to image X; positive image Y requires a negative pitch
+// command.
 cv::Vec2d cameraRelativeAimAngles(const cv::Vec3d& p_camera);
 
 // Yaw/pitch angles (degrees) to aim the gimbal at a camera-frame point.

@@ -440,7 +440,9 @@ cv::Vec2d cameraRelativeAimAngles(const cv::Vec3d& p_camera) {
     return cv::Vec2d(0.0, 0.0);
   }
 
-  const double yaw = std::atan2(p_camera[0], p_camera[2]);
+  // Daedalus positive yaw rotates the optical axis left in the image, so
+  // its command sign is opposite to OpenCV camera +X (image right).
+  const double yaw = -std::atan2(p_camera[0], p_camera[2]);
   const double pitch = -std::atan2(p_camera[1], horizontal);
   return cv::Vec2d(yaw * 180.0 / CV_PI, pitch * 180.0 / CV_PI);
 }
