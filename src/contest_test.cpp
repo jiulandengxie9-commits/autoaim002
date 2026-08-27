@@ -445,19 +445,24 @@ int main(int argc, char** argv) {
     motion.linear_speed_mps = static_cast<float>(c.speed);
     motion.linear_span_m = static_cast<float>(c.span);
     motion.spin_deg_s = static_cast<float>(c.spin_rps * 180.0 / CV_PI);
-    if (o.set_motion) {
+    if (!o.set_motion) {
+      motion.mode = RangeMotionMode::Stationary;
+      motion.linear_speed_mps = 0.0F;
+      motion.linear_span_m = 0.0F;
+      motion.spin_deg_s = 0.0F;
+    }
+    {
       auto mr = scene.setRangeTargetMotion(motion);
-      std::cout << "  set motion: mode=" << motionName(c.mode)
-                << " v=" << c.speed << " m/s span=" << c.span
-                << " m spin=" << c.spin_rps << " rad/s -> "
+      std::cout << "  set motion: mode=" << motionName(motion.mode)
+                << " v=" << motion.linear_speed_mps << " m/s span="
+                << motion.linear_span_m << " m spin="
+                << motion.spin_deg_s * CV_PI / 180.0 << " rad/s -> "
                 << (mr.ok() && mr.value ? statusName(mr.value->status)
                                         : mr.status.message.c_str());
       if (mr.ok() && mr.value) {
         std::cout << " applied_seq=" << mr.value->applied_frame_seq;
       }
       std::cout << "\n";
-    } else {
-      std::cout << "  set motion: skipped (--no-motion)\n";
     }
 
     // 2) 稳定 3 s。
