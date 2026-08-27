@@ -542,6 +542,8 @@ int main(int argc, char** argv) {
       const double pitch = cf.gimbal.pitch_deg;
       cv::Vec2d aim(0.0, 90.0);
       double aim_dist = 0.0;
+      cv::Vec3d aim_world(0.0, 0.0, 0.0);
+      bool have_aim_world = false;
       if (have_best) {
         // 用每帧云台世界位姿把目标转到世界（odom）系，再经 Kalman 平滑。
         // 关键：云台转动不影响目标世界坐标，Kalman 速度估计不会被云台运动污染。
@@ -574,12 +576,18 @@ int main(int argc, char** argv) {
           // using the synchronized gimbal world pose and quaternion.
           const cv::Vec3d p_g = vision::worldToGimbal(sol.aim_point, wp);
           aim = vision::absoluteWorldAimAngles(p_g, wp);
+          aim_world = sol.aim_point;
+          have_aim_world = true;
           aim_dist = sol.distance_m;
         } else {
           // PnP already gives the target in the gimbal frame, so use the
           // same absolute-angle conversion as the planned-target path.
           aim = vision::absoluteAimAngles(best.t_gimbal, yaw, pitch,
                                           camera_tilt_deg);
+          if (wp.valid) {
+            aim_world = vision::gimbalToWorld(best.t_gimbal, wp);
+            have_aim_world = true;
+          }
           aim_dist = best.distance_m;
         }
       }
@@ -599,13 +607,14 @@ int main(int argc, char** argv) {
             }
           }
           vision::drawAimHud(display, yaw, pitch, have_best, aim,
-                             have_best ? aim_dist : 0.0);
+                             have_best ? aim_dist : 0.0, have_aim_world,
+                             aim_world);
           char info[160];
           std::snprintf(info, sizeof(info),
                         "cond %d/6 %s  fired=%u/%u  locked=%llu",
                         ci + 1, c.name, st.rounds_fired, o.rounds,
                         (unsigned long long)st.locked_frames);
-          cv::putText(display, info, cv::Point(12, 80),
+          cv::putText(display, info, cv::Point(12, 104),
                       cv::FONT_HERSHEY_SIMPLEX, 0.55,
                       cv::Scalar(0, 200, 255), 1, cv::LINE_AA);
           cv::imshow(o.window_title, display);

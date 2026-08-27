@@ -879,20 +879,27 @@ int main(int argc, char** argv) {
       cv::Vec2d target_aim(0.0, 90.0);
       double target_dist = 0.0;
       bool hud_target = false;
+      cv::Vec3d target_world(0.0, 0.0, 0.0);
+      bool hud_world_target = false;
       if (kalman_active && world_pose.valid) {
         const cv::Vec3d target_gimbal =
             vision::worldToGimbal(tracker.filtered, world_pose);
+        target_world = tracker.filtered;
         target_aim = vision::absoluteWorldAimAngles(target_gimbal, world_pose);
         target_dist = cv::norm(target_gimbal);
         hud_target = true;
+        hud_world_target = true;
       } else if (camera_intrinsics.fx > 0.0) {
         for (const auto& p : poses) {
           if (!p.valid) continue;
-          target_aim = world_pose.valid
-                           ? vision::absoluteWorldAimAngles(p.t_gimbal, world_pose)
-                           : vision::absoluteAimAngles(
-                                 p.t_gimbal, g.yaw_deg, g.pitch_deg,
-                                 camera_tilt_deg);
+          if (world_pose.valid) {
+            target_world = vision::gimbalToWorld(p.t_gimbal, world_pose);
+            target_aim = vision::absoluteWorldAimAngles(p.t_gimbal, world_pose);
+            hud_world_target = true;
+          } else {
+            target_aim = vision::absoluteAimAngles(
+                p.t_gimbal, g.yaw_deg, g.pitch_deg, camera_tilt_deg);
+          }
           target_dist = cv::norm(p.t_gimbal);
           hud_target = true;
           break;
@@ -956,7 +963,8 @@ int main(int argc, char** argv) {
           // Aiming HUD: current gimbal angles + target aim (from the Kalman
           // filtered world position when active, otherwise the closest raw pose).
           vision::drawAimHud(display, g.yaw_deg, g.pitch_deg, hud_target,
-                             target_aim, target_dist);
+                             target_aim, target_dist, hud_world_target,
+                             target_world);
 
           cv::imshow(o.window_title, display);
           cv::imshow("Morphology Stages",
@@ -1010,7 +1018,8 @@ int main(int argc, char** argv) {
           }
         }
         vision::drawAimHud(saved, g.yaw_deg, g.pitch_deg, hud_target,
-                           target_aim, target_dist);
+                           target_aim, target_dist, hud_world_target,
+                           target_world);
         cv::imwrite(o.save_dir + "/result.png", saved);
       }
 

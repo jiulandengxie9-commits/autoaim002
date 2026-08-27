@@ -504,7 +504,8 @@ cv::Vec3d xyzToYpd(const cv::Vec3d& xyz) {
 
 void drawAimHud(cv::Mat& bgr, double gimbal_yaw_deg, double gimbal_pitch_deg,
                 bool has_target, const cv::Vec2d& target_aim,
-                double target_distance_m) {
+                double target_distance_m, bool has_world_point,
+                const cv::Vec3d& target_world) {
   const int cx = bgr.cols / 2;
   const int cy = bgr.rows / 2;
 
@@ -535,6 +536,14 @@ void drawAimHud(cv::Mat& bgr, double gimbal_yaw_deg, double gimbal_pitch_deg,
                   target_aim[0], target_aim[1], target_distance_m);
     cv::putText(bgr, line, cv::Point(12, 52), cv::FONT_HERSHEY_SIMPLEX, 0.55,
                 target_color, 1, cv::LINE_AA);
+
+    if (has_world_point) {
+      std::snprintf(line, sizeof(line),
+                    "target world=(%7.3f, %7.3f, %7.3f) m",
+                    target_world[0], target_world[1], target_world[2]);
+      cv::putText(bgr, line, cv::Point(12, 76), cv::FONT_HERSHEY_SIMPLEX, 0.55,
+                  target_color, 1, cv::LINE_AA);
+    }
 
     // Error bars: offset between the absolute target aim and the current
     // gimbal angle, drawn around the center crosshair.

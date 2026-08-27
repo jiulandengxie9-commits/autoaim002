@@ -223,7 +223,9 @@ cv::Vec3d worldToGimbal(const cv::Vec3d& p_world,
 // target_aim and the current gimbal angle.
 void drawAimHud(cv::Mat& bgr, double gimbal_yaw_deg, double gimbal_pitch_deg,
                 bool has_target, const cv::Vec2d& target_aim,
-                double target_distance_m);
+                double target_distance_m,
+                bool has_world_point = false,
+                const cv::Vec3d& target_world = cv::Vec3d());
 
 // Linear Kalman filter for a 3D target position. State vector is
 // [x, y, z, vx, vy, vz, ax, ay, az] with a constant-acceleration model
