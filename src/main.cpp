@@ -737,7 +737,7 @@ int main(int argc, char** argv) {
   constexpr int kLostHoldFrames = 5;
   constexpr double kAssociationGateM = 1.2;
   constexpr double kAimDeadbandDeg = 0.25;
-  constexpr double kMaxCommandStepDeg = 0.35;
+  constexpr double kMaxCommandStepDeg = 1.0;
 
   // 检测器：传统视觉或神经网络，--detector 切换。
   vision::MorphologyParams detector_morph;
