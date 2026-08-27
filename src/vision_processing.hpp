@@ -203,6 +203,11 @@ cv::Vec2d gimbalRelativeAimAngles(const cv::Vec3d& p_gimbal);
 // command.
 cv::Vec2d cameraRelativeAimAngles(const cv::Vec3d& p_camera);
 
+// Upward pitch correction in degrees for the contest's no-drag projectile.
+double gravityPitchCompensationDeg(double horizontal_distance_m,
+                                   double projectile_speed_mps,
+                                   double gravity_mps2 = 9.81);
+
 // Yaw/pitch angles (degrees) to aim the gimbal at a camera-frame point.
 // This legacy helper assumes the camera optical frame is already aligned with
 // the gimbal axes and should not be used when the fixed camera extrinsic is

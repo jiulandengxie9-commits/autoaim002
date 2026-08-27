@@ -904,8 +904,14 @@ int main(int argc, char** argv) {
             vision::gimbalToCamera(
                 vision::worldToGimbal(target_world, world_pose),
                 camera_extrinsics));
+        const cv::Vec3d target_camera_for_aim = vision::gimbalToCamera(
+            vision::worldToGimbal(target_world, world_pose),
+            camera_extrinsics);
+        const double gravity_pitch = vision::gravityPitchCompensationDeg(
+            std::hypot(target_camera_for_aim[0], target_camera_for_aim[2]),
+            25.0);
         target_aim = cv::Vec2d(g.yaw_deg + relative_aim[0],
-                               g.pitch_deg + relative_aim[1]);
+                               g.pitch_deg + relative_aim[1] + gravity_pitch);
         target_dist = cv::norm(target_world - cv::Vec3d(
             world_pose.position_m[0], world_pose.position_m[1],
             world_pose.position_m[2]));
@@ -930,8 +936,11 @@ int main(int argc, char** argv) {
             target_world = vision::gimbalToWorld(p.t_gimbal, world_pose);
             const cv::Vec2d relative_aim = vision::cameraRelativeAimAngles(
                 p.t_cam);
+            const double gravity_pitch = vision::gravityPitchCompensationDeg(
+                std::hypot(p.t_cam[0], p.t_cam[2]), 25.0);
             target_aim = cv::Vec2d(g.yaw_deg + relative_aim[0],
-                                   g.pitch_deg + relative_aim[1]);
+                                   g.pitch_deg + relative_aim[1] +
+                                       gravity_pitch);
             hud_world_target = true;
             target_world_sdk = world_pose.camera_valid
                                    ? vision::cameraToWorld(p.t_cam, world_pose)

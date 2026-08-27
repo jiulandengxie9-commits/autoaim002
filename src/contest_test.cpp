@@ -586,7 +586,8 @@ int main(int argc, char** argv) {
               vision::gimbalToCamera(
                   vision::worldToGimbal(sol.aim_point, wp), extrinsics));
           aim = cv::Vec2d(yaw + relative_aim[0],
-                          pitch + relative_aim[1]);
+                          pitch + relative_aim[1] +
+                              sol.pitch_rad * 180.0 / CV_PI);
           aim_world = sol.aim_point;
           have_aim_world = true;
           aim_dist = sol.distance_m;

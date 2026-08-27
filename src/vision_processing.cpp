@@ -447,6 +447,18 @@ cv::Vec2d cameraRelativeAimAngles(const cv::Vec3d& p_camera) {
   return cv::Vec2d(yaw * 180.0 / CV_PI, pitch * 180.0 / CV_PI);
 }
 
+double gravityPitchCompensationDeg(double horizontal_distance_m,
+                                   double projectile_speed_mps,
+                                   double gravity_mps2) {
+  if (horizontal_distance_m <= 1e-9 || projectile_speed_mps <= 1e-9 ||
+      gravity_mps2 <= 0.0) {
+    return 0.0;
+  }
+  const double flight_time = horizontal_distance_m / projectile_speed_mps;
+  const double drop = 0.5 * gravity_mps2 * flight_time * flight_time;
+  return std::atan2(drop, horizontal_distance_m) * 180.0 / CV_PI;
+}
+
 cv::Vec2d absoluteWorldAimAngles(const cv::Vec3d& target_world,
                                  const GimbalWorldPose& gimbal_pose) {
   const cv::Vec3d direction(
