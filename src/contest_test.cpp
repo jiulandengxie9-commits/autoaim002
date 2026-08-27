@@ -627,50 +627,18 @@ int main(int argc, char** argv) {
         }
         prev_ts = ts;
 
-        // The tracker position is absolute world (odom) coordinates, while
-        // the ballistic solver expects a target relative to the muzzle. Do
-        // not pass the world origin directly: world +Y is not muzzle height.
-        const cv::Vec3d muzzle_world(wp.position_m[0], wp.position_m[1],
-                                     wp.position_m[2]);
-        const cv::Vec3d target_relative = track_pos - muzzle_world;
-
-        // Predict in the muzzle-relative world frame, then convert the
-        // solution back to absolute world coordinates for camera projection.
-        const planning::AimSolution sol =
-            planning::planAimPoint(target_relative, track_vel, track_acc,
-                                   o.bullet_speed, o.fire_delay);
-        if (sol.valid && wp.valid) {
-          const cv::Vec3d aim_world_point = sol.aim_point + muzzle_world;
-          // Convert the planned world point to the exposure camera frame.
-          // The SDK yaw/pitch command convention follows image alignment,
-          // rather than the calibration geometry's gimbal coordinate axes.
-          const cv::Vec2d relative_aim = vision::cameraRelativeAimAngles(
-              vision::gimbalToCamera(
-                  vision::worldToGimbal(aim_world_point, wp), extrinsics));
-          const double line_of_sight_pitch = std::atan2(
-              target_relative[1],
-              std::hypot(target_relative[0], target_relative[2]));
-          const double gravity_pitch =
-              sol.pitch_rad - line_of_sight_pitch;
-          aim = cv::Vec2d(yaw + relative_aim[0],
-                          pitch + relative_aim[1] +
-                              gravity_pitch * 180.0 / CV_PI);
-          aim_world = aim_world_point;
-          have_aim_world = true;
-          aim_dist = sol.distance_m;
-        } else {
-          // PnP already gives the target in the gimbal frame, so use the
-          // same absolute-angle conversion as the planned-target path.
-          aim = vision::absoluteAimAngles(best.t_gimbal, yaw, pitch,
-                                          camera_tilt_deg);
-          if (wp.valid) {
-            aim_world = (wp.camera_valid)
-                           ? vision::cameraToWorld(best.t_cam, wp)
-                           : vision::gimbalToWorld(best.t_gimbal, wp);
-            have_aim_world = true;
-          }
-          aim_dist = best.distance_m;
-        }
+        // Use the associated armor's camera-frame error for the gimbal
+        // control loop. World/Kalman state remains useful for association and
+        // diagnostics, but does not directly drive the servo command.
+        const cv::Vec2d relative_aim =
+            vision::cameraRelativeAimAngles(best.t_cam);
+        const double gravity_pitch = vision::gravityPitchCompensationDeg(
+            std::hypot(best.t_cam[0], best.t_cam[2]), o.bullet_speed);
+        aim = cv::Vec2d(yaw + relative_aim[0],
+                        pitch + relative_aim[1] + gravity_pitch);
+        aim_world = cur_w;
+        have_aim_world = wp.valid;
+        aim_dist = best.distance_m;
       }
       if (show_window) {
         try {
@@ -738,16 +706,27 @@ int main(int argc, char** argv) {
       ++st.locked_frames;
       ++lock_streak;
 
-      // Command slew-rate limit bounds a single-frame detection jump.
-      constexpr double kMaxCommandStepDeg = 1.5;
+      // A camera-error deadband and strict slew limit prevent visual noise
+      // from continually exciting the gimbal around an already centred armor.
+      constexpr double kAimDeadbandDeg = 0.25;
+      constexpr double kMaxCommandStepDeg = 0.35;
       if (have_best) {
+        double requested_yaw_delta = aim[0] - yaw;
+        double requested_pitch_delta = aim[1] - pitch;
+        if (std::abs(requested_yaw_delta) < kAimDeadbandDeg) {
+          requested_yaw_delta = 0.0;
+        }
+        if (std::abs(requested_pitch_delta) < kAimDeadbandDeg) {
+          requested_pitch_delta = 0.0;
+        }
         const auto limit_step = [&](double current, double requested) {
           return current + std::clamp(requested - current,
                                       -kMaxCommandStepDeg,
                                       kMaxCommandStepDeg);
         };
-        smooth_aim = cv::Vec2d(limit_step(yaw, aim[0]),
-                               limit_step(pitch, aim[1]));
+        smooth_aim = cv::Vec2d(
+            limit_step(yaw, yaw + requested_yaw_delta),
+            limit_step(pitch, pitch + requested_pitch_delta));
         last_safe_aim = smooth_aim;
         has_last_safe_aim = true;
         const double yaw_error = std::abs(smooth_aim[0] - yaw);
