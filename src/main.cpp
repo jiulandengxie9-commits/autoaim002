@@ -982,7 +982,6 @@ int main(int argc, char** argv) {
           command.pitch_deg = static_cast<float>(recovery[1]);
           command.distance_m = 0.0F;
           if (lost_frames > kLostHoldFrames) {
-            smooth_aim = cv::Vec2d(0.0, 63.0);
             has_last_safe_aim = false;
             last_target_world.reset();
           }
