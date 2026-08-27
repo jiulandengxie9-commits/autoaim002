@@ -108,6 +108,13 @@ struct GimbalWorldPose {
   bool valid = false;
 };
 
+// Compute Daedalus absolute command angles for a target point expressed in
+// the gimbal frame and the exposure-synchronized gimbal world pose. This
+// uses the pose quaternion, rather than adding local angles to the current
+// command angles.
+cv::Vec2d absoluteWorldAimAngles(const cv::Vec3d& target_gimbal,
+                                 const GimbalWorldPose& gimbal_pose);
+
 // A full 3D pose (world coordinates) of a detected target, expressed in the
 // camera optical frame and in the robot gimbal frame (the "world" for aiming).
 struct TargetPose {

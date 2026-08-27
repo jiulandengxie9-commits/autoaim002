@@ -570,10 +570,10 @@ int main(int argc, char** argv) {
             planning::planAimPoint(track_pos, track_vel, track_acc,
                                    o.bullet_speed, o.fire_delay);
         if (sol.valid && wp.valid) {
-          // Convert the predicted absolute-world point into the current
-          // exposure's gimbal frame, then add the synchronized absolute angle.
+          // Convert the predicted absolute-world point to a command angle
+          // using the synchronized gimbal world pose and quaternion.
           const cv::Vec3d p_g = vision::worldToGimbal(sol.aim_point, wp);
-          aim = vision::absoluteAimAngles(p_g, yaw, pitch, camera_tilt_deg);
+          aim = vision::absoluteWorldAimAngles(p_g, wp);
           aim_dist = sol.distance_m;
         } else {
           // PnP already gives the target in the gimbal frame, so use the

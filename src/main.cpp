@@ -773,6 +773,11 @@ int main(int argc, char** argv) {
               << " pitch_vel=" << g.pitch_velocity_deg_s << " deg/s"
               << " last_cmd=" << g.last_applied_command_id << "\n";
 
+    // Read this frame's world pose before detector/PnP work. The simulator
+    // retains only the latest 16 exposure poses.
+    const vision::GimbalWorldPose world_pose =
+        readGimbalWorldPose(metadata_mapping, h.source_sequence);
+
     if (o.scene == "energy" || o.scene == "large-energy") {
       printBigRuneScore(sim);
     }
@@ -834,8 +839,6 @@ int main(int argc, char** argv) {
       std::vector<vision::TargetPose> poses =
           computePoses(det, camera_intrinsics, camera_extrinsics,
                        o.armor_width, o.armor_height);
-      vision::GimbalWorldPose world_pose =
-          readGimbalWorldPose(metadata_mapping, h.source_sequence);
       printPoses(poses, world_pose);
 
       bool kalman_active = false;
@@ -857,11 +860,12 @@ int main(int argc, char** argv) {
                     << " vel=(" << v[0] << ", " << v[1] << ", " << v[2]
                     << ") m/s"
                     << " lost=" << tracker.lost_frames;
-          // 瞄准角用滤波后的世界坐标：world -> gimbal -> absolute command。
+          // Convert the filtered world point to the current gimbal frame;
+          // absoluteWorldAimAngles then uses the synchronized world pose.
           if (world_pose.valid) {
             const cv::Vec3d f_gimbal = vision::worldToGimbal(f, world_pose);
-            const cv::Vec2d abs_aim = vision::absoluteAimAngles(
-                f_gimbal, g.yaw_deg, g.pitch_deg, camera_tilt_deg);
+            const cv::Vec2d abs_aim =
+                vision::absoluteWorldAimAngles(f_gimbal, world_pose);
             std::cout << " aim_yaw=" << std::fixed << std::setprecision(2)
                       << abs_aim[0] << " aim_pitch=" << abs_aim[1];
           }
@@ -878,15 +882,17 @@ int main(int argc, char** argv) {
       if (kalman_active && world_pose.valid) {
         const cv::Vec3d target_gimbal =
             vision::worldToGimbal(tracker.filtered, world_pose);
-        target_aim = vision::absoluteAimAngles(
-            target_gimbal, g.yaw_deg, g.pitch_deg, camera_tilt_deg);
+        target_aim = vision::absoluteWorldAimAngles(target_gimbal, world_pose);
         target_dist = cv::norm(target_gimbal);
         hud_target = true;
       } else if (camera_intrinsics.fx > 0.0) {
         for (const auto& p : poses) {
           if (!p.valid) continue;
-          target_aim = vision::absoluteAimAngles(
-              p.t_gimbal, g.yaw_deg, g.pitch_deg, camera_tilt_deg);
+          target_aim = world_pose.valid
+                           ? vision::absoluteWorldAimAngles(p.t_gimbal, world_pose)
+                           : vision::absoluteAimAngles(
+                                 p.t_gimbal, g.yaw_deg, g.pitch_deg,
+                                 camera_tilt_deg);
           target_dist = cv::norm(p.t_gimbal);
           hud_target = true;
           break;
