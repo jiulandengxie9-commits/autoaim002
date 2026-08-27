@@ -482,11 +482,11 @@ int main(int argc, char** argv) {
     std::uint64_t last_seq = 0;
     int lock_streak = 0;               // 连续锁定帧数（开火前需稳定）
     const int lock_warmup_frames = 3;  // 云台收敛后再开火（降低防卡住）
-    std::uint32_t hit_count_initial = 0;
+    std::uint64_t last_hit_event_id = 0;
     {
       auto hit0 = sim.getLatestArmorHit();
       if (hit0.ok() && hit0.value && hit0.value->has_hit) {
-        hit_count_initial = hit0.value->accurate_count;
+        last_hit_event_id = hit0.value->event_id;
       }
     }
     // 目标运动估计：世界系 Kalman（pos/vel/acc），抑制 NN 检测抖动。
@@ -527,14 +527,20 @@ int main(int argc, char** argv) {
       last_seq = cf.image.header.source_sequence;
       ++st.total_frames;
 
-      // 轮询权威命中：getLatestArmorHit.accurate_count 是累计有效命中数，
-      // 每工况命中数 = 工况结束时累计值 - 工况开始时累计值。
+      // event_id is monotonic across authoritative armor-hit events. Do not
+      // derive condition hits from accurate_count: it is target-local and may
+      // reset when the range target state changes.
       {
         auto hit = sim.getLatestArmorHit();
-        if (hit.ok() && hit.value && hit.value->has_hit) {
-          st.hits = hit.value->accurate_count > hit_count_initial
-                        ? hit.value->accurate_count - hit_count_initial
-                        : 0;
+        if (hit.ok() && hit.value && hit.value->has_hit &&
+            hit.value->event_id > last_hit_event_id) {
+          const std::uint64_t new_hits =
+              hit.value->event_id - last_hit_event_id;
+          st.hits += new_hits;
+          last_hit_event_id = hit.value->event_id;
+          std::cout << "  hit: event_id=" << hit.value->event_id
+                    << " target=" << hit.value->target_name
+                    << " condition_hits=" << st.hits << "\n";
         }
       }
 
