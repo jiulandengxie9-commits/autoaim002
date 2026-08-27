@@ -579,10 +579,12 @@ int main(int argc, char** argv) {
                                    o.bullet_speed, o.fire_delay);
         if (sol.valid && wp.valid) {
           // sol.aim_point is already in simulator world coordinates.
-          // Convert the planned world point into this exposure's gimbal
-          // frame before producing absolute SDK command angles.
-          const cv::Vec2d relative_aim = vision::gimbalRelativeAimAngles(
-              vision::worldToGimbal(sol.aim_point, wp));
+          // Convert the planned world point to the exposure camera frame.
+          // The SDK yaw/pitch command convention follows image alignment,
+          // rather than the calibration geometry's gimbal coordinate axes.
+          const cv::Vec2d relative_aim = vision::cameraRelativeAimAngles(
+              vision::gimbalToCamera(
+                  vision::worldToGimbal(sol.aim_point, wp), extrinsics));
           aim = cv::Vec2d(yaw + relative_aim[0],
                           pitch + relative_aim[1]);
           aim_world = sol.aim_point;

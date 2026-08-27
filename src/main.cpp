@@ -870,10 +870,12 @@ int main(int argc, char** argv) {
                     << " lost=" << tracker.lost_frames;
           // The filter state is already expressed in simulator world axes.
           if (world_pose.valid) {
-            // Commands are absolute SDK angles, while f is in world
-            // coordinates. Convert through the exposure-synced gimbal frame.
-            const cv::Vec2d relative_aim = vision::gimbalRelativeAimAngles(
-                vision::worldToGimbal(f, world_pose));
+            // The SDK command axes are aligned to camera-image yaw/pitch,
+            // not to the static calibration file's gimbal geometry axes.
+            // Convert the world tracker result back to the exposure camera.
+            const cv::Vec2d relative_aim = vision::cameraRelativeAimAngles(
+                vision::gimbalToCamera(
+                    vision::worldToGimbal(f, world_pose), camera_extrinsics));
             const cv::Vec2d abs_aim(
                 g.yaw_deg + relative_aim[0],
                 g.pitch_deg + relative_aim[1]);
@@ -898,8 +900,10 @@ int main(int argc, char** argv) {
       bool hud_coordinate_target = false;
       if (kalman_active && world_pose.valid) {
         target_world = tracker.filtered;
-        const cv::Vec2d relative_aim = vision::gimbalRelativeAimAngles(
-            vision::worldToGimbal(target_world, world_pose));
+        const cv::Vec2d relative_aim = vision::cameraRelativeAimAngles(
+            vision::gimbalToCamera(
+                vision::worldToGimbal(target_world, world_pose),
+                camera_extrinsics));
         target_aim = cv::Vec2d(g.yaw_deg + relative_aim[0],
                                g.pitch_deg + relative_aim[1]);
         target_dist = cv::norm(target_world - cv::Vec3d(
@@ -924,8 +928,8 @@ int main(int argc, char** argv) {
           target_gimbal = p.t_gimbal;
           if (world_pose.valid) {
             target_world = vision::gimbalToWorld(p.t_gimbal, world_pose);
-            const cv::Vec2d relative_aim = vision::gimbalRelativeAimAngles(
-                vision::worldToGimbal(target_world, world_pose));
+            const cv::Vec2d relative_aim = vision::cameraRelativeAimAngles(
+                p.t_cam);
             target_aim = cv::Vec2d(g.yaw_deg + relative_aim[0],
                                    g.pitch_deg + relative_aim[1]);
             hud_world_target = true;

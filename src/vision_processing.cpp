@@ -434,6 +434,17 @@ cv::Vec2d gimbalRelativeAimAngles(const cv::Vec3d& p_gimbal) {
   return cv::Vec2d(yaw * 180.0 / CV_PI, pitch * 180.0 / CV_PI);
 }
 
+cv::Vec2d cameraRelativeAimAngles(const cv::Vec3d& p_camera) {
+  const double horizontal = std::hypot(p_camera[0], p_camera[2]);
+  if (horizontal <= 1e-9 && std::abs(p_camera[1]) <= 1e-9) {
+    return cv::Vec2d(0.0, 0.0);
+  }
+
+  const double yaw = std::atan2(p_camera[0], p_camera[2]);
+  const double pitch = -std::atan2(p_camera[1], horizontal);
+  return cv::Vec2d(yaw * 180.0 / CV_PI, pitch * 180.0 / CV_PI);
+}
+
 cv::Vec2d absoluteWorldAimAngles(const cv::Vec3d& target_world,
                                  const GimbalWorldPose& gimbal_pose) {
   const cv::Vec3d direction(

@@ -197,6 +197,11 @@ cv::Vec3d pixelToWorld(const cv::Point2f& uv, double depth,
 // +z forward. Pitch is 90 degrees at level and increases when aiming up.
 cv::Vec2d gimbalRelativeAimAngles(const cv::Vec3d& p_gimbal);
 
+// Yaw/pitch corrections (degrees) from a target in the camera optical frame.
+// OpenCV's camera frame is +X right, +Y down and +Z forward. These are image
+// alignment errors, so a positive image Y requires a negative pitch command.
+cv::Vec2d cameraRelativeAimAngles(const cv::Vec3d& p_camera);
+
 // Yaw/pitch angles (degrees) to aim the gimbal at a camera-frame point.
 // This legacy helper assumes the camera optical frame is already aligned with
 // the gimbal axes and should not be used when the fixed camera extrinsic is
