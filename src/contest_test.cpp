@@ -61,6 +61,7 @@ struct Options {
   bool fire = true;
   bool show_window = true;
   bool set_motion = true;  // 跳过靶车运动设置（用于静止靶车验证）
+  bool use_kalman = true;
   std::string window_title = "AutoAim Test";
   double bullet_speed = 25.0;  // 比赛版弹丸初速 25 m/s
   double fire_delay = 0.0;     // 开火延迟（命令到实际发射），秒，可调
@@ -127,6 +128,7 @@ void printUsage(const char* argv0) {
       << "  --only N            run only condition N (0..5), default all\n"
       << "  --no-fire           aim only, do not fire\n"
       << "  --no-motion         do not set target motion (stationary target)\n"
+      << "  --no-kalman         use raw PnP positions instead of Kalman tracking\n"
       << "  --no-window         disable the OpenCV visualization window\n"
       << "  --window NAME       visualization window title (default AutoAim Test)\n"
       << "  --armor-width M     armor width in meters (default 0.135)\n"
@@ -238,6 +240,8 @@ Options parseArgs(int argc, char** argv) {
       o.fire = false;
     } else if (arg == "--no-motion") {
       o.set_motion = false;
+    } else if (arg == "--no-kalman") {
+      o.use_kalman = false;
     } else if (arg == "--no-window") {
       o.show_window = false;
     } else if (arg == "--window") {
@@ -425,6 +429,7 @@ int main(int argc, char** argv) {
             << " color=" << (o.color == vision::LightColor::Blue ? "blue" : "red")
             << " bullet_speed=" << o.bullet_speed << " m/s"
             << " fire_delay=" << o.fire_delay << " s"
+            << " kalman=" << (o.use_kalman ? "on" : "off")
             << " armor=" << o.armor_width << "x" << o.armor_height << " m"
             << "\n\n";
 
@@ -574,15 +579,25 @@ int main(int argc, char** argv) {
         const std::uint64_t ts = cf.image.header.capture_timestamp_ns;
         const double dt = prev_ts ? (ts - prev_ts) * 1e-9 : 0.0;
         const double kf_dt = (dt > 0.0 && dt < 0.5) ? dt : 1.0 / 60.0;
-        if (!kf_inited) {
+        if (!kf_inited || !o.use_kalman) {
           track_kf.init(cur_w, kf_dt);
           kf_inited = true;
         } else {
           track_kf.predict(kf_dt);
           track_kf.update(cur_w);
         }
-        track_pos = track_kf.position();
-        track_vel = track_kf.velocity();
+        track_pos = o.use_kalman ? track_kf.position() : cur_w;
+        track_vel = o.use_kalman ? track_kf.velocity() : cv::Vec3d(0, 0, 0);
+        if (st.total_frames % 30 == 0) {
+          const cv::Vec3d filtered = track_kf.position();
+          std::cout << "  tracker: raw=(" << cur_w[0] << ", " << cur_w[1]
+                    << ", " << cur_w[2] << ") filtered=(" << filtered[0]
+                    << ", " << filtered[1] << ", " << filtered[2]
+                    << ") vel=(" << track_kf.velocity()[0] << ", "
+                    << track_kf.velocity()[1] << ", "
+                    << track_kf.velocity()[2] << ") residual="
+                    << cv::norm(cur_w - filtered) << " m\n";
+        }
         prev_ts = ts;
 
         // The tracker position is absolute world (odom) coordinates, while
