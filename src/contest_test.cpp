@@ -576,23 +576,30 @@ int main(int argc, char** argv) {
         track_vel = track_kf.velocity();
         prev_ts = ts;
 
-        // 规划器：在世界系预测提前量 + 弹道解算。
-        // 预测时刻 = 开火延迟(fire_delay) + 弹丸飞行时间。
+        // The tracker position is absolute world (odom) coordinates, while
+        // the ballistic solver expects a target relative to the muzzle. Do
+        // not pass the world origin directly: world +Y is not muzzle height.
+        const cv::Vec3d muzzle_world(wp.position_m[0], wp.position_m[1],
+                                     wp.position_m[2]);
+        const cv::Vec3d target_relative = track_pos - muzzle_world;
+
+        // Predict in the muzzle-relative world frame, then convert the
+        // solution back to absolute world coordinates for camera projection.
         const planning::AimSolution sol =
-            planning::planAimPoint(track_pos, track_vel, track_acc,
+            planning::planAimPoint(target_relative, track_vel, track_acc,
                                    o.bullet_speed, o.fire_delay);
         if (sol.valid && wp.valid) {
-          // sol.aim_point is already in simulator world coordinates.
+          const cv::Vec3d aim_world_point = sol.aim_point + muzzle_world;
           // Convert the planned world point to the exposure camera frame.
           // The SDK yaw/pitch command convention follows image alignment,
           // rather than the calibration geometry's gimbal coordinate axes.
           const cv::Vec2d relative_aim = vision::cameraRelativeAimAngles(
               vision::gimbalToCamera(
-                  vision::worldToGimbal(sol.aim_point, wp), extrinsics));
+                  vision::worldToGimbal(aim_world_point, wp), extrinsics));
           aim = cv::Vec2d(yaw + relative_aim[0],
                           pitch + relative_aim[1] +
                               sol.pitch_rad * 180.0 / CV_PI);
-          aim_world = sol.aim_point;
+          aim_world = aim_world_point;
           have_aim_world = true;
           aim_dist = sol.distance_m;
         } else {
