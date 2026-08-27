@@ -46,7 +46,7 @@ struct Options {
   int grid_width = 480;
   double armor_width = 0.135;
   double armor_height = 0.056;
-  bool use_kalman = true;
+  bool use_kalman = false;
   bool send_commands = false;
   double kf_pos_sigma = 0.01;
   double kf_vel_sigma = 0.1;
@@ -173,7 +173,7 @@ void printUsage(const char* argv0) {
        << "  --armor-width M    real armor plate width in meters (default 0.135)\n"
        << "  --armor-height M   real armor plate height in meters (default 0.056)\n"
        << "  --kalman           enable Kalman smoothing of the PnP position\n"
-       << "                    (default)\n"
+       << "                    (default: off for direct visual control)\n"
        << "  --no-kalman        disable Kalman smoothing\n"
       << "  --control          send calculated absolute yaw/pitch to the simulator\n"
       << "                    (default: display and log only)\n"
@@ -730,6 +730,14 @@ int main(int argc, char** argv) {
   const auto t0 = std::chrono::steady_clock::now();
   bool show_window = true;
   KalmanTracker tracker;
+  std::optional<cv::Vec3d> last_target_world;
+  cv::Vec2d last_safe_aim(0.0, 63.0);
+  bool has_last_safe_aim = false;
+  int lost_frames = 0;
+  constexpr int kLostHoldFrames = 5;
+  constexpr double kAssociationGateM = 1.2;
+  constexpr double kAimDeadbandDeg = 0.25;
+  constexpr double kMaxCommandStepDeg = 0.35;
 
   // 检测器：传统视觉或神经网络，--detector 切换。
   vision::MorphologyParams detector_morph;
@@ -898,69 +906,87 @@ int main(int argc, char** argv) {
       cv::Vec3d target_gimbal(0.0, 0.0, 0.0);
       cv::Vec3d target_world_sdk(0.0, 0.0, 0.0);
       bool hud_coordinate_target = false;
-      if (kalman_active && world_pose.valid) {
-        target_world = tracker.filtered;
-        const cv::Vec2d relative_aim = vision::cameraRelativeAimAngles(
-            vision::gimbalToCamera(
-                vision::worldToGimbal(target_world, world_pose),
-                camera_extrinsics));
-        const cv::Vec3d target_camera_for_aim = vision::gimbalToCamera(
-            vision::worldToGimbal(target_world, world_pose),
-            camera_extrinsics);
-        const double gravity_pitch = vision::gravityPitchCompensationDeg(
-            std::hypot(target_camera_for_aim[0], target_camera_for_aim[2]),
-            25.0);
-        target_aim = cv::Vec2d(g.yaw_deg + relative_aim[0],
-                               g.pitch_deg + relative_aim[1] + gravity_pitch);
-        target_dist = cv::norm(target_world - cv::Vec3d(
-            world_pose.position_m[0], world_pose.position_m[1],
-            world_pose.position_m[2]));
-        hud_target = true;
-        hud_world_target = true;
-        for (const auto& p : poses) {
-          if (!p.valid) continue;
-          target_camera = p.t_cam;
-          target_gimbal = p.t_gimbal;
-          target_world_sdk = world_pose.camera_valid
-                                 ? vision::cameraToWorld(p.t_cam, world_pose)
-                                 : target_world;
-          hud_coordinate_target = true;
-          break;
-        }
-      } else if (camera_intrinsics.fx > 0.0) {
-        for (const auto& p : poses) {
-          if (!p.valid) continue;
-          target_camera = p.t_cam;
-          target_gimbal = p.t_gimbal;
-          if (world_pose.valid) {
-            target_world = vision::gimbalToWorld(p.t_gimbal, world_pose);
-            const cv::Vec2d relative_aim = vision::cameraRelativeAimAngles(
-                p.t_cam);
-            const double gravity_pitch = vision::gravityPitchCompensationDeg(
-                std::hypot(p.t_cam[0], p.t_cam[2]), 25.0);
-            target_aim = cv::Vec2d(g.yaw_deg + relative_aim[0],
-                                   g.pitch_deg + relative_aim[1] +
-                                       gravity_pitch);
-            hud_world_target = true;
-            target_world_sdk = world_pose.camera_valid
-                                   ? vision::cameraToWorld(p.t_cam, world_pose)
-                                   : target_world;
-            hud_coordinate_target = true;
-          } else {
-            target_aim = vision::absoluteAimAngles(
-                p.t_gimbal, g.yaw_deg, g.pitch_deg, camera_tilt_deg);
-          }
-          target_dist = cv::norm(p.t_gimbal);
-          hud_target = true;
-          break;
+      int selected_pose = -1;
+      double selected_score = 1e18;
+      for (std::size_t i = 0; i < poses.size(); ++i) {
+        if (!poses[i].valid) continue;
+        const cv::Vec3d candidate_world =
+            (world_pose.valid && world_pose.camera_valid)
+                ? vision::cameraToWorld(poses[i].t_cam, world_pose)
+                : (world_pose.valid
+                       ? vision::gimbalToWorld(poses[i].t_gimbal, world_pose)
+                       : poses[i].t_gimbal);
+        const double score = last_target_world
+                                 ? cv::norm(candidate_world - *last_target_world)
+                                 : poses[i].distance_m;
+        if (score < selected_score) {
+          selected_score = score;
+          selected_pose = static_cast<int>(i);
         }
       }
+      if (last_target_world && selected_score > kAssociationGateM) {
+        selected_pose = -1;
+      }
 
-      if (o.send_commands && hud_target) {
+      if (selected_pose >= 0 && camera_intrinsics.fx > 0.0) {
+        const vision::TargetPose& selected = poses[selected_pose];
+        target_camera = selected.t_cam;
+        target_gimbal = selected.t_gimbal;
+        target_world = (world_pose.valid && world_pose.camera_valid)
+                           ? vision::cameraToWorld(selected.t_cam, world_pose)
+                           : (world_pose.valid
+                                  ? vision::gimbalToWorld(selected.t_gimbal,
+                                                          world_pose)
+                                  : selected.t_gimbal);
+        last_target_world = target_world;
+        lost_frames = 0;
+        const cv::Vec2d relative_aim =
+            vision::cameraRelativeAimAngles(selected.t_cam);
+        const double gravity_pitch = vision::gravityPitchCompensationDeg(
+            std::hypot(selected.t_cam[0], selected.t_cam[2]), 25.0);
+        target_aim = cv::Vec2d(g.yaw_deg + relative_aim[0],
+                               g.pitch_deg + relative_aim[1] + gravity_pitch);
+        target_dist = selected.distance_m;
+        hud_target = true;
+        hud_world_target = world_pose.valid;
+        target_world_sdk = world_pose.camera_valid
+                               ? vision::cameraToWorld(selected.t_cam, world_pose)
+                               : target_world;
+        hud_coordinate_target = world_pose.valid;
+      }
+
+      if (o.send_commands) {
         UdpGimbalCommand command;
-        command.yaw_deg = static_cast<float>(target_aim[0]);
-        command.pitch_deg = static_cast<float>(target_aim[1]);
-        command.distance_m = static_cast<float>(target_dist);
+        if (hud_target) {
+          double yaw_delta = target_aim[0] - g.yaw_deg;
+          double pitch_delta = target_aim[1] - g.pitch_deg;
+          if (std::abs(yaw_delta) < kAimDeadbandDeg) yaw_delta = 0.0;
+          if (std::abs(pitch_delta) < kAimDeadbandDeg) pitch_delta = 0.0;
+          command.yaw_deg = static_cast<float>(
+              g.yaw_deg + std::clamp(yaw_delta, -kMaxCommandStepDeg,
+                                     kMaxCommandStepDeg));
+          command.pitch_deg = static_cast<float>(
+              g.pitch_deg + std::clamp(pitch_delta, -kMaxCommandStepDeg,
+                                       kMaxCommandStepDeg));
+          command.distance_m = static_cast<float>(target_dist);
+          last_safe_aim = cv::Vec2d(*command.yaw_deg, *command.pitch_deg);
+          has_last_safe_aim = true;
+          lost_frames = 0;
+        } else {
+          ++lost_frames;
+          const cv::Vec2d recovery =
+              (has_last_safe_aim && lost_frames <= kLostHoldFrames)
+                  ? last_safe_aim
+                  : cv::Vec2d(0.0, 63.0);
+          command.yaw_deg = static_cast<float>(recovery[0]);
+          command.pitch_deg = static_cast<float>(recovery[1]);
+          command.distance_m = 0.0F;
+          if (lost_frames > kLostHoldFrames) {
+            smooth_aim = cv::Vec2d(0.0, 63.0);
+            has_last_safe_aim = false;
+            last_target_world.reset();
+          }
+        }
         const auto sent = sim.sendAim(command);
         if (!sent.ok()) {
           std::cout << "sendAim: " << sent.status.message << "\n";
