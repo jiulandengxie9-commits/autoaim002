@@ -506,6 +506,14 @@ int main(int argc, char** argv) {
     constexpr int kStableFramesRequired = 5;
     constexpr double kAimErrorThresholdDeg = 0.8;
     constexpr double kGimbalVelocityThresholdDegS = 6.0;
+    constexpr int kLostHoldFrames = 5;
+    constexpr double kAssociationGateM = 1.2;
+    constexpr double kCenterYawDeg = 0.0;
+    constexpr double kCenterPitchDeg = 63.0;
+    std::optional<cv::Vec3d> last_target_world;
+    cv::Vec2d last_safe_aim(kCenterYawDeg, kCenterPitchDeg);
+    bool has_last_safe_aim = false;
+    int lost_frames = 0;
     bool window_open = true;
 
     while (window_open) {
@@ -545,21 +553,40 @@ int main(int argc, char** argv) {
       vision::DetectionResult det = detector->detect(image);
       vision::normalizeArmorVertices(det);
 
-      // 选最近的装甲板并解算位姿。
+      const vision::GimbalWorldPose wp =
+          readGimbalWorldPose(metadata_mapping, cf.image.header.source_sequence);
+
+      // Select the armor associated with the previous world-frame target.
+      // A nearest-depth choice switches between visible armor plates as the
+      // target rotates, which makes the gimbal oscillate.
       vision::TargetPose best;
+      cv::Vec3d best_world;
       bool have_best = false;
       if (!det.armors.empty() && intrinsics.fx > 0.0) {
-        double best_dist = 1e18;
+        double best_score = 1e18;
         for (const auto& armor : det.armors) {
           vision::TargetPose p =
               vision::solveArmorPose(armor, intrinsics, extrinsics,
                                      o.armor_width, o.armor_height);
           if (!p.valid) continue;
-          if (p.distance_m < best_dist) {
-            best_dist = p.distance_m;
+          const cv::Vec3d candidate_world =
+              (wp.valid && wp.camera_valid)
+                  ? vision::cameraToWorld(p.t_cam, wp)
+                  : (wp.valid ? vision::gimbalToWorld(p.t_gimbal, wp)
+                              : p.t_gimbal);
+          const double score = last_target_world
+                                   ? cv::norm(candidate_world - *last_target_world)
+                                   : p.distance_m;
+          if (score < best_score) {
+            best_score = score;
             best = p;
+            best_world = candidate_world;
             have_best = true;
           }
+        }
+        if (last_target_world &&
+            best_score > kAssociationGateM) {
+          have_best = false;
         }
       }
 
@@ -573,12 +600,9 @@ int main(int argc, char** argv) {
       if (have_best) {
         // 用每帧云台世界位姿把目标转到世界（odom）系，再经 Kalman 平滑。
         // 关键：云台转动不影响目标世界坐标，Kalman 速度估计不会被云台运动污染。
-        const vision::GimbalWorldPose wp =
-            readGimbalWorldPose(metadata_mapping, cf.image.header.source_sequence);
-        const cv::Vec3d cur_w =
-            (wp.valid && wp.camera_valid) ? vision::cameraToWorld(best.t_cam, wp)
-            : (wp.valid ? vision::gimbalToWorld(best.t_gimbal, wp)
-                        : best.t_gimbal);
+        const cv::Vec3d cur_w = best_world;
+        last_target_world = cur_w;
+        lost_frames = 0;
         const std::uint64_t ts = cf.image.header.capture_timestamp_ns;
         const double dt = prev_ts ? (ts - prev_ts) * 1e-9 : 0.0;
         const double kf_dt = (dt > 0.0 && dt < 0.5) ? dt : 1.0 / 60.0;
@@ -693,14 +717,26 @@ int main(int argc, char** argv) {
       if (!have_best) {
         lock_streak = 0;
         stable_frames = 0;
+        ++lost_frames;
+
+        UdpGimbalCommand cmd;
+        if (has_last_safe_aim && lost_frames <= kLostHoldFrames) {
+          cmd.yaw_deg = static_cast<float>(last_safe_aim[0]);
+          cmd.pitch_deg = static_cast<float>(last_safe_aim[1]);
+        } else {
+          cmd.yaw_deg = static_cast<float>(kCenterYawDeg);
+          cmd.pitch_deg = static_cast<float>(kCenterPitchDeg);
+          smooth_aim = cv::Vec2d(kCenterYawDeg, kCenterPitchDeg);
+          has_last_safe_aim = false;
+          last_target_world.reset();
+        }
+        cmd.distance_m = 0.0F;
+        cmd.fire_advice = false;
+        (void)sim.sendAim(cmd);
         continue;
       }
       ++st.locked_frames;
       ++lock_streak;
-      if (lock_streak < lock_warmup_frames) {
-        stable_frames = 0;
-        continue;
-      }
 
       // Command slew-rate limit bounds a single-frame detection jump.
       constexpr double kMaxCommandStepDeg = 1.5;
@@ -712,6 +748,8 @@ int main(int argc, char** argv) {
         };
         smooth_aim = cv::Vec2d(limit_step(yaw, aim[0]),
                                limit_step(pitch, aim[1]));
+        last_safe_aim = smooth_aim;
+        has_last_safe_aim = true;
         const double yaw_error = std::abs(smooth_aim[0] - yaw);
         const double pitch_error = std::abs(smooth_aim[1] - pitch);
         const bool gimbal_stable =
@@ -732,7 +770,8 @@ int main(int argc, char** argv) {
       cmd.pitch_deg = static_cast<float>(smooth_aim[1]);
       cmd.distance_m = static_cast<float>(best.distance_m);
       const bool fire_ready =
-          o.fire && stable_frames >= kStableFramesRequired;
+          o.fire && lock_streak >= lock_warmup_frames &&
+          stable_frames >= kStableFramesRequired;
       cmd.fire_advice = fire_ready;
 
       const auto now = std::chrono::steady_clock::now();
