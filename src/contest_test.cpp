@@ -710,7 +710,7 @@ int main(int argc, char** argv) {
       // A camera-error deadband and strict slew limit prevent visual noise
       // from continually exciting the gimbal around an already centred armor.
       constexpr double kAimDeadbandDeg = 0.25;
-      constexpr double kMaxCommandStepDeg = 1.0;
+      constexpr double kMaxCommandStepDeg = 1.5;
       if (have_best) {
         double requested_yaw_delta = aim[0] - yaw;
         double requested_pitch_delta = aim[1] - pitch;
