@@ -485,6 +485,10 @@ int main(int argc, char** argv) {
     const auto t0 = std::chrono::steady_clock::now();
     double fire_cooldown_s = 0.06;  // ~16 发/s（模拟器射击冷却）
     auto last_fire = t0;
+    int stable_frames = 0;
+    constexpr int kStableFramesRequired = 5;
+    constexpr double kAimErrorThresholdDeg = 0.8;
+    constexpr double kGimbalVelocityThresholdDegS = 6.0;
     bool window_open = true;
 
     while (window_open) {
@@ -649,35 +653,56 @@ int main(int argc, char** argv) {
       // 有目标时才瞄准开火。连续锁定 warmup 帧（让云台收敛、目标稳定）后才开火。
       if (!have_best) {
         lock_streak = 0;
+        stable_frames = 0;
         continue;
       }
       ++st.locked_frames;
       ++lock_streak;
-      if (lock_streak < lock_warmup_frames) continue;
+      if (lock_streak < lock_warmup_frames) {
+        stable_frames = 0;
+        continue;
+      }
 
       // 云台命令低通：避免检测框抖动导致 aim 跳变、云台乱动。
       const double alpha = 0.35;  // 新命令权重（越小越平滑）
       if (have_best) {
         smooth_aim = cv::Vec2d(smooth_aim[0] * (1.0 - alpha) + aim[0] * alpha,
                                smooth_aim[1] * (1.0 - alpha) + aim[1] * alpha);
+        const double yaw_error = std::abs(smooth_aim[0] - yaw);
+        const double pitch_error = std::abs(smooth_aim[1] - pitch);
+        const bool gimbal_stable =
+            yaw_error <= kAimErrorThresholdDeg &&
+            pitch_error <= kAimErrorThresholdDeg &&
+            std::abs(cf.gimbal.yaw_velocity_deg_s) <=
+                kGimbalVelocityThresholdDegS &&
+            std::abs(cf.gimbal.pitch_velocity_deg_s) <=
+                kGimbalVelocityThresholdDegS;
+        stable_frames = gimbal_stable ? stable_frames + 1 : 0;
       } else {
         smooth_aim = aim;  // 无目标直接用（保持最后角度）
+        stable_frames = 0;
       }
 
       UdpGimbalCommand cmd;
       cmd.yaw_deg = static_cast<float>(smooth_aim[0]);
       cmd.pitch_deg = static_cast<float>(smooth_aim[1]);
       cmd.distance_m = static_cast<float>(best.distance_m);
-      cmd.fire_advice = o.fire;
+      const bool fire_ready =
+          o.fire && stable_frames >= kStableFramesRequired;
+      cmd.fire_advice = fire_ready;
 
       const auto now = std::chrono::steady_clock::now();
       const double since = std::chrono::duration<double>(now - last_fire).count();
       if (!o.fire) {
         (void)sim.sendAim(cmd);
-      } else if (since >= fire_cooldown_s) {
+      } else if (fire_ready && since >= fire_cooldown_s) {
         (void)sim.sendAim(cmd);
         last_fire = now;
         ++st.rounds_fired;
+      } else {
+        // Keep tracking the target without requesting a shot.
+        cmd.fire_advice = false;
+        (void)sim.sendAim(cmd);
       }
     }
 
