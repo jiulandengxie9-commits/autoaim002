@@ -187,9 +187,13 @@ vision::GimbalWorldPose readWorldPose(const TalosMetadataMapping& m,
   pose.valid = true;
   for (int i = 0; i < 3; ++i) {
     pose.position_m[i] = es.gimbal_position_world[i];
+    pose.camera_position_m[i] = es.camera_position_world[i];
     pose.quaternion_wxyz[i] = es.gimbal_quaternion_world_wxyz[i];
+    pose.camera_quaternion_wxyz[i] = es.camera_quaternion_world_wxyz[i];
   }
   pose.quaternion_wxyz[3] = es.gimbal_quaternion_world_wxyz[3];
+  pose.camera_quaternion_wxyz[3] = es.camera_quaternion_world_wxyz[3];
+  pose.camera_valid = (es.state_flags & kExposureStateHasCameraWorldPose) != 0;
   return pose;
 }
 
@@ -268,6 +272,7 @@ int main(int argc, char** argv) {
     cv::Mat img = frameToBgr(cf.image);
     if (img.empty()) continue;
     vision::DetectionResult det = detector->detect(img);
+    vision::normalizeArmorVertices(det);
 
     const auto wp = readWorldPose(meta, last_seq);
 
@@ -292,8 +297,10 @@ int main(int argc, char** argv) {
     cv::Vec3d kf_pos(0, 0, 0);
     bool have_kf = false;
     if (have_best && o.use_kalman) {
-      const cv::Vec3d cur_w = wp.valid ? vision::gimbalToWorld(best.t_gimbal, wp)
-                                       : best.t_gimbal;
+      const cv::Vec3d cur_w =
+          (wp.valid && wp.camera_valid) ? vision::cameraToWorld(best.t_cam, wp)
+          : (wp.valid ? vision::gimbalToWorld(best.t_gimbal, wp)
+                      : best.t_gimbal);
       const double dt = prev_ts ? (ts - prev_ts) * 1e-9 : 1.0 / 60.0;
       if (!kf_inited) {
         kf.init(cur_w, dt);
@@ -318,8 +325,10 @@ int main(int argc, char** argv) {
       if (bh <= 0) bh = bw * 0.5;
     }
 
-    const cv::Vec3d w = wp.valid ? vision::gimbalToWorld(best.t_gimbal, wp)
-                                 : best.t_gimbal;
+    const cv::Vec3d w =
+        (wp.valid && wp.camera_valid) ? vision::cameraToWorld(best.t_cam, wp)
+        : (wp.valid ? vision::gimbalToWorld(best.t_gimbal, wp)
+                    : best.t_gimbal);
     csv << last_seq << "," << ts << "," << det.armors.size() << ","
         << (have_best ? best.t_cam[0] : 0) << "," << (have_best ? best.t_cam[1] : 0) << ","
         << (have_best ? best.t_cam[2] : 0) << ","

@@ -4,6 +4,7 @@
 #include <opencv2/imgproc.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <string>
 #include <vector>
@@ -103,16 +104,64 @@ cv::RotatedRect adjustLightRect(const cv::RotatedRect& rec) {
 }
 
 void adjustVertexOrder(cv::Point2f* pts) {
-  int idx = 0;
+  cv::Point2f center(0.0F, 0.0F);
+  for (int i = 0; i < 4; ++i) center += pts[i];
+  center *= 0.25F;
+
+  // Image coordinates have +x right and +y down, so increasing atan2 angle
+  // around the center is clockwise.
+  std::array<int, 4> order{0, 1, 2, 3};
+  std::sort(order.begin(), order.end(), [&](int a, int b) {
+    return std::atan2(pts[a].y - center.y, pts[a].x - center.x) <
+           std::atan2(pts[b].y - center.y, pts[b].x - center.x);
+  });
+
+  // For a rotated rectangle, the top-most point is not necessarily the
+  // image-space top-left point. The minimum x+y corner is the stable TL
+  // choice, including for normal perspective/rotation angles.
+  int start = 0;
+  double best_score = static_cast<double>(pts[order[0]].x) +
+                      static_cast<double>(pts[order[0]].y);
   for (int i = 1; i < 4; ++i) {
-    if (pts[i].x + pts[i].y < pts[idx].x + pts[idx].y) idx = i;
+    const cv::Point2f& p = pts[order[i]];
+    const double score = static_cast<double>(p.x) + static_cast<double>(p.y);
+    if (score < best_score) {
+      best_score = score;
+      start = i;
+    }
   }
-  cv::Point2f temp[4];
-  for (int i = 0; i < 4; ++i) temp[i] = pts[(idx + i) % 4];
-  std::copy(temp, temp + 4, pts);
+
+  std::array<cv::Point2f, 4> sorted{};
+  for (int i = 0; i < 4; ++i) sorted[i] = pts[order[(start + i) % 4]];
+
+  // Positive shoelace area is clockwise in image coordinates. Reverse the
+  // winding while preserving the upper-left first corner when necessary.
+  double area2 = 0.0;
+  for (int i = 0; i < 4; ++i) {
+    const auto& a = sorted[i];
+    const auto& b = sorted[(i + 1) % 4];
+    area2 += static_cast<double>(a.x) * b.y -
+             static_cast<double>(b.x) * a.y;
+  }
+  if (area2 < 0.0) std::swap(sorted[1], sorted[3]);
+  std::copy(sorted.begin(), sorted.end(), pts);
 }
 
 }  // namespace
+
+ArmorDescriptor orderedArmor(const ArmorDescriptor& armor) {
+  ArmorDescriptor ordered = armor;
+  adjustVertexOrder(ordered.vertex);
+  ordered.left.center = (ordered.vertex[0] + ordered.vertex[3]) * 0.5F;
+  ordered.right.center = (ordered.vertex[1] + ordered.vertex[2]) * 0.5F;
+  return ordered;
+}
+
+void normalizeArmorVertices(DetectionResult& result) {
+  for (auto& armor : result.armors) {
+    armor = orderedArmor(armor);
+  }
+}
 
 DetectionResult detect(const std::vector<std::vector<cv::Point>>& contours,
                        const DetectionParams& params) {
@@ -224,8 +273,14 @@ cv::Mat drawResult(const cv::Mat& bgr, const MorphologyResult& m,
   }
 
   for (const auto& armor : det.armors) {
-    const std::vector<cv::Point> box(armor.vertex, armor.vertex + 4);
+    const ArmorDescriptor ordered = orderedArmor(armor);
+    const std::vector<cv::Point> box(ordered.vertex, ordered.vertex + 4);
     cv::polylines(result, box, true, cv::Scalar(255, 0, 0), 3);
+    for (int i = 0; i < 4; ++i) {
+      cv::putText(result, std::to_string(i + 1), ordered.vertex[i],
+                  cv::FONT_HERSHEY_SIMPLEX, 0.65, cv::Scalar(0, 0, 255),
+                  2, cv::LINE_AA);
+    }
   }
 
   return result;
@@ -379,9 +434,8 @@ cv::Vec2d gimbalRelativeAimAngles(const cv::Vec3d& p_gimbal) {
   return cv::Vec2d(yaw * 180.0 / CV_PI, pitch * 180.0 / CV_PI);
 }
 
-cv::Vec2d absoluteWorldAimAngles(const cv::Vec3d& target_gimbal,
+cv::Vec2d absoluteWorldAimAngles(const cv::Vec3d& target_world,
                                  const GimbalWorldPose& gimbal_pose) {
-  const cv::Vec3d target_world = gimbalToWorld(target_gimbal, gimbal_pose);
   const cv::Vec3d direction(
       target_world[0] - gimbal_pose.position_m[0],
       target_world[1] - gimbal_pose.position_m[1],
@@ -441,6 +495,17 @@ cv::Vec3d gimbalToWorld(const cv::Vec3d& p_gimbal,
   const cv::Vec3d t(pose.position_m[0], pose.position_m[1],
                     pose.position_m[2]);
   return R * p_gimbal + t;
+}
+
+cv::Vec3d cameraToWorld(const cv::Vec3d& p_camera,
+                        const GimbalWorldPose& pose) {
+  const cv::Matx33d R = quatWxyzToRot(pose.camera_quaternion_wxyz[0],
+                                      pose.camera_quaternion_wxyz[1],
+                                      pose.camera_quaternion_wxyz[2],
+                                      pose.camera_quaternion_wxyz[3]);
+  const cv::Vec3d t(pose.camera_position_m[0], pose.camera_position_m[1],
+                    pose.camera_position_m[2]);
+  return R * p_camera + t;
 }
 
 cv::Vec3d worldToGimbal(const cv::Vec3d& p_world,
@@ -505,7 +570,9 @@ cv::Vec3d xyzToYpd(const cv::Vec3d& xyz) {
 void drawAimHud(cv::Mat& bgr, double gimbal_yaw_deg, double gimbal_pitch_deg,
                 bool has_target, const cv::Vec2d& target_aim,
                 double target_distance_m, bool has_world_point,
-                const cv::Vec3d& target_world) {
+                const cv::Vec3d& target_world, bool send_enabled,
+                bool has_send_data, const cv::Vec2d& send_angles,
+                double send_distance_m) {
   const int cx = bgr.cols / 2;
   const int cy = bgr.rows / 2;
 
@@ -541,7 +608,7 @@ void drawAimHud(cv::Mat& bgr, double gimbal_yaw_deg, double gimbal_pitch_deg,
       std::snprintf(line, sizeof(line),
                     "target world=(%7.3f, %7.3f, %7.3f) m",
                     target_world[0], target_world[1], target_world[2]);
-      cv::putText(bgr, line, cv::Point(12, 76), cv::FONT_HERSHEY_SIMPLEX, 0.55,
+    cv::putText(bgr, line, cv::Point(12, 76), cv::FONT_HERSHEY_SIMPLEX, 0.55,
                   target_color, 1, cv::LINE_AA);
     }
 
@@ -559,6 +626,20 @@ void drawAimHud(cv::Mat& bgr, double gimbal_yaw_deg, double gimbal_pitch_deg,
     cv::putText(bgr, "target: none", cv::Point(12, 52),
                 cv::FONT_HERSHEY_SIMPLEX, 0.55, dim, 1, cv::LINE_AA);
   }
+
+  // Show exactly the values that the caller passes to the simulator command.
+  // Keep this line visible even when no target is available.
+  const char* send_state = send_enabled ? "on" : "off";
+  if (has_send_data) {
+    std::snprintf(line, sizeof(line),
+                  "send[%s] yaw=%7.2f pitch=%7.2f dist=%6.2f m",
+                  send_state, send_angles[0], send_angles[1],
+                  send_distance_m);
+  } else {
+    std::snprintf(line, sizeof(line), "send[%s] no target data", send_state);
+  }
+  cv::putText(bgr, line, cv::Point(12, 100), cv::FONT_HERSHEY_SIMPLEX, 0.55,
+              send_enabled ? target_color : dim, 1, cv::LINE_AA);
 }
 
 KalmanFilter3D::KalmanFilter3D() {
@@ -681,8 +762,9 @@ TargetPose solveArmorPose(const ArmorDescriptor& armor,
       cv::Point3f(+hw, +hh, 0.0F),   // BR
       cv::Point3f(-hw, +hh, 0.0F),   // BL
   };
+  const ArmorDescriptor ordered = orderedArmor(armor);
   const std::vector<cv::Point2f> image_points = {
-      armor.vertex[0], armor.vertex[1], armor.vertex[2], armor.vertex[3]};
+      ordered.vertex[0], ordered.vertex[1], ordered.vertex[2], ordered.vertex[3]};
 
   const cv::Mat camera_matrix =
       (cv::Mat_<double>(3, 3) << intrinsics.fx, 0.0, intrinsics.cx, 0.0,

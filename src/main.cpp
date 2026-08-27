@@ -470,9 +470,13 @@ vision::GimbalWorldPose readGimbalWorldPose(
   pose.valid = true;
   for (int i = 0; i < 3; ++i) {
     pose.position_m[i] = es.gimbal_position_world[i];
+    pose.camera_position_m[i] = es.camera_position_world[i];
     pose.quaternion_wxyz[i] = es.gimbal_quaternion_world_wxyz[i];
+    pose.camera_quaternion_wxyz[i] = es.camera_quaternion_world_wxyz[i];
   }
   pose.quaternion_wxyz[3] = es.gimbal_quaternion_world_wxyz[3];
+  pose.camera_quaternion_wxyz[3] = es.camera_quaternion_world_wxyz[3];
+  pose.camera_valid = (es.state_flags & kExposureStateHasCameraWorldPose) != 0;
   return pose;
 }
 
@@ -560,10 +564,15 @@ bool updateKalman(KalmanTracker& t, const std::vector<vision::TargetPose>& poses
   }
   t.last_timestamp_ns = timestamp_ns;
 
-  // Convert a pose's gimbal-frame position into the world frame.
-  const auto to_world = [&](const cv::Vec3d& p_gimbal) -> cv::Vec3d {
-    return world_pose.valid ? vision::gimbalToWorld(p_gimbal, world_pose)
-                            : p_gimbal;
+  // PnP gives target_camera. Prefer the simulator's same-frame camera pose
+  // for camera -> world; this avoids mixing fixed extrinsics with a second
+  // world-pose transform.
+  const auto to_world = [&](const vision::TargetPose& pose) -> cv::Vec3d {
+    if (world_pose.valid && world_pose.camera_valid) {
+      return vision::cameraToWorld(pose.t_cam, world_pose);
+    }
+    return world_pose.valid ? vision::gimbalToWorld(pose.t_gimbal, world_pose)
+                            : pose.t_gimbal;
   };
 
   if (!t.has_target) {
@@ -572,7 +581,7 @@ bool updateKalman(KalmanTracker& t, const std::vector<vision::TargetPose>& poses
     double best_score = 1e18;
     for (std::size_t i = 0; i < poses.size(); ++i) {
       if (!poses[i].valid) continue;
-      const double score = to_world(poses[i].t_gimbal)[2];  // depth
+      const double score = to_world(poses[i])[2];  // depth
       if (score < best_score) {
         best_score = score;
         best = static_cast<int>(i);
@@ -582,7 +591,7 @@ bool updateKalman(KalmanTracker& t, const std::vector<vision::TargetPose>& poses
       t.lost_frames = 0;
       return false;
     }
-    t.measurement = to_world(poses[best].t_gimbal);
+    t.measurement = to_world(poses[best]);
     t.kf.init(t.measurement, dt);
     t.filtered = t.measurement;
     t.velocity = cv::Vec3d(0, 0, 0);
@@ -600,7 +609,7 @@ bool updateKalman(KalmanTracker& t, const std::vector<vision::TargetPose>& poses
   double best_dist = 1e18;
   for (std::size_t i = 0; i < poses.size(); ++i) {
     if (!poses[i].valid) continue;
-    const double d = cv::norm(to_world(poses[i].t_gimbal) - predicted);
+    const double d = cv::norm(to_world(poses[i]) - predicted);
     if (d < best_dist) {
       best_dist = d;
       best = static_cast<int>(i);
@@ -608,7 +617,7 @@ bool updateKalman(KalmanTracker& t, const std::vector<vision::TargetPose>& poses
   }
 
   if (best >= 0 && best_dist < 2.0) {  // gate: < 2 m from prediction
-    t.measurement = to_world(poses[best].t_gimbal);
+    t.measurement = to_world(poses[best]);
     if (t.kf.update(t.measurement)) {
       t.filtered = t.kf.position();
       t.velocity = t.kf.velocity();
@@ -818,6 +827,7 @@ int main(int argc, char** argv) {
 
     // 用所选检测器识别装甲板。
     det = detector->detect(image);
+    vision::normalizeArmorVertices(det);
     std::cout << "detect[" << detector->name() << "]: armors=" << det.armors.size()
               << "\n";
 
@@ -860,12 +870,10 @@ int main(int argc, char** argv) {
                     << " vel=(" << v[0] << ", " << v[1] << ", " << v[2]
                     << ") m/s"
                     << " lost=" << tracker.lost_frames;
-          // Convert the filtered world point to the current gimbal frame;
-          // absoluteWorldAimAngles then uses the synchronized world pose.
+          // The filter state is already expressed in simulator world axes.
           if (world_pose.valid) {
-            const cv::Vec3d f_gimbal = vision::worldToGimbal(f, world_pose);
             const cv::Vec2d abs_aim =
-                vision::absoluteWorldAimAngles(f_gimbal, world_pose);
+                vision::absoluteWorldAimAngles(f, world_pose);
             std::cout << " aim_yaw=" << std::fixed << std::setprecision(2)
                       << abs_aim[0] << " aim_pitch=" << abs_aim[1];
           }
@@ -882,19 +890,21 @@ int main(int argc, char** argv) {
       cv::Vec3d target_world(0.0, 0.0, 0.0);
       bool hud_world_target = false;
       if (kalman_active && world_pose.valid) {
-        const cv::Vec3d target_gimbal =
-            vision::worldToGimbal(tracker.filtered, world_pose);
         target_world = tracker.filtered;
-        target_aim = vision::absoluteWorldAimAngles(target_gimbal, world_pose);
-        target_dist = cv::norm(target_gimbal);
+        target_aim = vision::absoluteWorldAimAngles(target_world, world_pose);
+        target_dist = cv::norm(target_world - cv::Vec3d(
+            world_pose.position_m[0], world_pose.position_m[1],
+            world_pose.position_m[2]));
         hud_target = true;
         hud_world_target = true;
       } else if (camera_intrinsics.fx > 0.0) {
         for (const auto& p : poses) {
           if (!p.valid) continue;
           if (world_pose.valid) {
-            target_world = vision::gimbalToWorld(p.t_gimbal, world_pose);
-            target_aim = vision::absoluteWorldAimAngles(p.t_gimbal, world_pose);
+            target_world = (world_pose.camera_valid)
+                               ? vision::cameraToWorld(p.t_cam, world_pose)
+                               : vision::gimbalToWorld(p.t_gimbal, world_pose);
+            target_aim = vision::absoluteWorldAimAngles(target_world, world_pose);
             hud_world_target = true;
           } else {
             target_aim = vision::absoluteAimAngles(
@@ -964,7 +974,8 @@ int main(int argc, char** argv) {
           // filtered world position when active, otherwise the closest raw pose).
           vision::drawAimHud(display, g.yaw_deg, g.pitch_deg, hud_target,
                              target_aim, target_dist, hud_world_target,
-                             target_world);
+                             target_world, o.send_commands, hud_target,
+                             target_aim, target_dist);
 
           cv::imshow(o.window_title, display);
           cv::imshow("Morphology Stages",
@@ -1019,7 +1030,8 @@ int main(int argc, char** argv) {
         }
         vision::drawAimHud(saved, g.yaw_deg, g.pitch_deg, hud_target,
                            target_aim, target_dist, hud_world_target,
-                           target_world);
+                           target_world, o.send_commands, hud_target,
+                           target_aim, target_dist);
         cv::imwrite(o.save_dir + "/result.png", saved);
       }
 

@@ -48,6 +48,10 @@ struct ArmorDescriptor {
   cv::Point2f vertex[4];
 };
 
+// Return a copy whose vertices are always ordered as 1=top-left,
+// 2=top-right, 3=bottom-right, 4=bottom-left in image coordinates.
+ArmorDescriptor orderedArmor(const ArmorDescriptor& armor);
+
 struct DetectionParams {
   double min_light_area = 40.0;
   double min_contour_solidity = 0.3;
@@ -82,6 +86,10 @@ struct DetectionResult {
   std::vector<ArmorCandidate> candidates;
 };
 
+// Normalize all detected armor vertices in place and keep light centers
+// consistent with the normalized vertices.
+void normalizeArmorVertices(DetectionResult& result);
+
 // Camera intrinsic parameters (from camera-calibration.json / readCameraInfo).
 struct CameraIntrinsics {
   double fx = 0.0;
@@ -105,14 +113,16 @@ struct CameraExtrinsics {
 struct GimbalWorldPose {
   double position_m[3] = {0.0, 0.0, 0.0};
   double quaternion_wxyz[4] = {1.0, 0.0, 0.0, 0.0};
+  double camera_position_m[3] = {0.0, 0.0, 0.0};
+  double camera_quaternion_wxyz[4] = {1.0, 0.0, 0.0, 0.0};
+  bool camera_valid = false;
   bool valid = false;
 };
 
 // Compute Daedalus absolute command angles for a target point expressed in
-// the gimbal frame and the exposure-synchronized gimbal world pose. This
-// uses the pose quaternion, rather than adding local angles to the current
-// command angles.
-cv::Vec2d absoluteWorldAimAngles(const cv::Vec3d& target_gimbal,
+// the simulator world frame. target_world must use the same world axes as the
+// SDK exposure pose: right-handed with +Y up and pitch=90 degrees level.
+cv::Vec2d absoluteWorldAimAngles(const cv::Vec3d& target_world,
                                  const GimbalWorldPose& gimbal_pose);
 
 // A full 3D pose (world coordinates) of a detected target, expressed in the
@@ -212,6 +222,11 @@ cv::Vec2d aimWithGravity(const cv::Vec3d& p_cam, double gimbal_yaw_deg,
 cv::Vec3d gimbalToWorld(const cv::Vec3d& p_gimbal,
                         const GimbalWorldPose& pose);
 
+// Transform a point from the camera optical frame directly into the
+// simulator world frame using the exposure-synchronized camera pose.
+cv::Vec3d cameraToWorld(const cv::Vec3d& p_camera,
+                        const GimbalWorldPose& pose);
+
 // Inverse of gimbalToWorld: world (odom) frame -> gimbal frame.
 cv::Vec3d worldToGimbal(const cv::Vec3d& p_world,
                         const GimbalWorldPose& pose);
@@ -225,7 +240,11 @@ void drawAimHud(cv::Mat& bgr, double gimbal_yaw_deg, double gimbal_pitch_deg,
                 bool has_target, const cv::Vec2d& target_aim,
                 double target_distance_m,
                 bool has_world_point = false,
-                const cv::Vec3d& target_world = cv::Vec3d());
+                const cv::Vec3d& target_world = cv::Vec3d(),
+                bool send_enabled = false,
+                bool has_send_data = false,
+                const cv::Vec2d& send_angles = cv::Vec2d(),
+                double send_distance_m = 0.0);
 
 // Linear Kalman filter for a 3D target position. State vector is
 // [x, y, z, vx, vy, vz, ax, ay, az] with a constant-acceleration model

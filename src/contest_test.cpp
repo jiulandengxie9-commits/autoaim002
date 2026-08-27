@@ -328,9 +328,13 @@ vision::GimbalWorldPose readGimbalWorldPose(
   pose.valid = true;
   for (int i = 0; i < 3; ++i) {
     pose.position_m[i] = es.gimbal_position_world[i];
+    pose.camera_position_m[i] = es.camera_position_world[i];
     pose.quaternion_wxyz[i] = es.gimbal_quaternion_world_wxyz[i];
+    pose.camera_quaternion_wxyz[i] = es.camera_quaternion_world_wxyz[i];
   }
   pose.quaternion_wxyz[3] = es.gimbal_quaternion_world_wxyz[3];
+  pose.camera_quaternion_wxyz[3] = es.camera_quaternion_world_wxyz[3];
+  pose.camera_valid = (es.state_flags & kExposureStateHasCameraWorldPose) != 0;
   return pose;
 }
 
@@ -518,6 +522,7 @@ int main(int argc, char** argv) {
       // 用所选检测器识别装甲板（传统视觉或神经网络，--detector 切换）。
       vision::MorphologyResult morph;  // 空：形态学网格不用于测试工具
       vision::DetectionResult det = detector->detect(image);
+      vision::normalizeArmorVertices(det);
 
       // 选最近的装甲板并解算位姿。
       vision::TargetPose best;
@@ -550,8 +555,9 @@ int main(int argc, char** argv) {
         const vision::GimbalWorldPose wp =
             readGimbalWorldPose(metadata_mapping, cf.image.header.source_sequence);
         const cv::Vec3d cur_w =
-            wp.valid ? vision::gimbalToWorld(best.t_gimbal, wp)
-                     : best.t_gimbal;
+            (wp.valid && wp.camera_valid) ? vision::cameraToWorld(best.t_cam, wp)
+            : (wp.valid ? vision::gimbalToWorld(best.t_gimbal, wp)
+                        : best.t_gimbal);
         const std::uint64_t ts = cf.image.header.capture_timestamp_ns;
         const double dt = prev_ts ? (ts - prev_ts) * 1e-9 : 0.0;
         const double kf_dt = (dt > 0.0 && dt < 0.5) ? dt : 1.0 / 60.0;
@@ -572,10 +578,8 @@ int main(int argc, char** argv) {
             planning::planAimPoint(track_pos, track_vel, track_acc,
                                    o.bullet_speed, o.fire_delay);
         if (sol.valid && wp.valid) {
-          // Convert the predicted absolute-world point to a command angle
-          // using the synchronized gimbal world pose and quaternion.
-          const cv::Vec3d p_g = vision::worldToGimbal(sol.aim_point, wp);
-          aim = vision::absoluteWorldAimAngles(p_g, wp);
+          // sol.aim_point is already in simulator world coordinates.
+          aim = vision::absoluteWorldAimAngles(sol.aim_point, wp);
           aim_world = sol.aim_point;
           have_aim_world = true;
           aim_dist = sol.distance_m;
@@ -585,7 +589,9 @@ int main(int argc, char** argv) {
           aim = vision::absoluteAimAngles(best.t_gimbal, yaw, pitch,
                                           camera_tilt_deg);
           if (wp.valid) {
-            aim_world = vision::gimbalToWorld(best.t_gimbal, wp);
+            aim_world = (wp.camera_valid)
+                           ? vision::cameraToWorld(best.t_cam, wp)
+                           : vision::gimbalToWorld(best.t_gimbal, wp);
             have_aim_world = true;
           }
           aim_dist = best.distance_m;
@@ -608,7 +614,7 @@ int main(int argc, char** argv) {
           }
           vision::drawAimHud(display, yaw, pitch, have_best, aim,
                              have_best ? aim_dist : 0.0, have_aim_world,
-                             aim_world);
+                             aim_world, true, have_best, aim, aim_dist);
           char info[160];
           std::snprintf(info, sizeof(info),
                         "cond %d/6 %s  fired=%u/%u  locked=%llu",
