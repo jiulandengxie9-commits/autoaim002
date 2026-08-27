@@ -503,8 +503,8 @@ int main(int argc, char** argv) {
     double fire_cooldown_s = 0.06;  // ~16 发/s（模拟器射击冷却）
     auto last_fire = t0;
     int stable_frames = 0;
-    constexpr int kStableFramesRequired = 5;
-    constexpr double kAimErrorThresholdDeg = 0.8;
+    constexpr int kStableFramesRequired = 3;
+    constexpr double kAimErrorThresholdDeg = 1.5;
     constexpr double kGimbalVelocityThresholdDegS = 6.0;
     constexpr int kLostHoldFrames = 5;
     constexpr double kAssociationGateM = 1.2;
